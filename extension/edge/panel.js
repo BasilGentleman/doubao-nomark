@@ -8,17 +8,18 @@
     grid: document.getElementById('grid'),
     toast: document.getElementById('toast'),
     meta: document.querySelector('.meta'),
+    themeToggle: document.querySelector('.theme-toggle'),
     close: document.querySelector('.close'),
     previewModal: document.getElementById('preview-modal'),
     previewDialog: document.getElementById('preview-dialog'),
     previewClose: document.getElementById('preview-close')
   };
-  const { grid, toast: toastEl, meta: metaEl, close: closeBtn,
+  const { grid, toast: toastEl, meta: metaEl, themeToggle, close: closeBtn,
     previewModal, previewDialog, previewClose } = elements;
   const navButtons = [...document.querySelectorAll('.nav button')];
   let activePreview = null;
   let toastTimer = null;
-  const theme = window.DoubaoNomarkTheme || {};
+  const themeController = window.DoubaoNomarkThemes;
   const titleEl = document.querySelector('.title');
   const quoteEl = document.querySelector('.quote');
   const quoteTextEl = document.querySelector('.quote-text');
@@ -33,12 +34,20 @@
     window.parent.postMessage(message, parentOrigin || '*');
   }
 
-  if (theme.copy) {
-    if (theme.copy.title) titleEl.textContent = theme.copy.title;
-    quoteTextEl.textContent = theme.copy.quote || '';
-    quoteAuthorEl.textContent = theme.copy.author || '';
-    if (!theme.copy.quote && !theme.copy.author) quoteEl.classList.add('is-empty');
+  function updateThemeUI(theme) {
+    const copy = theme?.copy || {};
+    titleEl.textContent = copy.title || '无水印素材';
+    quoteTextEl.textContent = copy.quote || '';
+    quoteAuthorEl.textContent = copy.author || '';
+    quoteEl.classList.toggle('is-empty', !copy.quote && !copy.author);
+
+    const currentName = themeController?.currentName || 'none';
+    const currentLabel = theme?.name || '无主题';
+    themeToggle.setAttribute('aria-label', `切换主题，当前：${currentLabel}`);
+    themeToggle.setAttribute('aria-pressed', String(currentName !== 'none'));
   }
+
+  updateThemeUI(themeController?.current || window.DoubaoNomarkTheme || {});
 
   function updatePanelScale() {
     if (!window.innerWidth || !window.innerHeight) return;
@@ -289,6 +298,11 @@
     } else {
       document.getElementById('modal').style.display = 'none';
     }
+  });
+
+  themeToggle.addEventListener('click', () => {
+    if (!themeController) return;
+    updateThemeUI(themeController.next());
   });
 
   previewClose.addEventListener('click', closePreview);

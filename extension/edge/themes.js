@@ -90,10 +90,62 @@
     }
   };
 
-  const requested = new URLSearchParams(window.location.search).get('theme') || 'none';
-  const active = themes[requested] || themes.none;
   const root = document.documentElement;
-  root.dataset.theme = requested in themes ? requested : 'none';
-  Object.entries(active.vars).forEach(([name, value]) => root.style.setProperty(name, value));
-  window.DoubaoNomarkTheme = active;
+  const storageKey = 'doubao-nomark-panel-theme';
+  const themeNames = Object.keys(themes);
+  const themeVars = new Set(
+    Object.values(themes).flatMap(theme => Object.keys(theme.vars))
+  );
+
+  function readStoredTheme() {
+    try {
+      return localStorage.getItem(storageKey);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function storeTheme(name) {
+    try {
+      localStorage.setItem(storageKey, name);
+    } catch (_) { /* The theme still works when storage is unavailable. */ }
+  }
+
+  function applyTheme(name, { persist = true } = {}) {
+    const nextName = name in themes ? name : 'none';
+    const nextTheme = themes[nextName];
+
+    themeVars.forEach(variable => root.style.removeProperty(variable));
+    Object.entries(nextTheme.vars).forEach(([variable, value]) => {
+      root.style.setProperty(variable, value);
+    });
+    root.dataset.theme = nextName;
+    window.DoubaoNomarkTheme = nextTheme;
+    if (persist) storeTheme(nextName);
+    return nextTheme;
+  }
+
+  const requestedTheme = new URLSearchParams(window.location.search).get('theme') || 'none';
+  const storedTheme = readStoredTheme();
+  const initialTheme = storedTheme in themes
+    ? storedTheme
+    : (requestedTheme in themes ? requestedTheme : 'none');
+
+  window.DoubaoNomarkThemes = {
+    all: themes,
+    apply: applyTheme,
+    next() {
+      const currentIndex = themeNames.indexOf(root.dataset.theme);
+      const nextName = themeNames[(currentIndex + 1) % themeNames.length];
+      return applyTheme(nextName);
+    },
+    get current() {
+      return themes[root.dataset.theme] || themes.none;
+    },
+    get currentName() {
+      return root.dataset.theme || 'none';
+    }
+  };
+
+  applyTheme(initialTheme, { persist: false });
 })();

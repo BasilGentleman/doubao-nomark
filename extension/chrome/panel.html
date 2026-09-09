@@ -113,7 +113,7 @@ button{color:inherit}
   opacity:var(--theme-bg-opacity);
 }
 
-.close{
+.close,.theme-toggle{
   position:absolute; top:var(--theme-close-top); right:var(--theme-close-right); z-index:10;
   width:var(--theme-close-size); height:var(--theme-close-size); border-radius:var(--theme-close-radius);
   border:1px solid var(--theme-close-border);
@@ -130,9 +130,57 @@ button{color:inherit}
   color:var(--theme-text);
   cursor:pointer;
 }
-.close:hover{
+.close:hover,.theme-toggle:hover{
   border-color:var(--theme-close-hover-border);
   background:var(--theme-close-hover-bg);
+}
+.close:focus-visible,.theme-toggle:focus-visible{
+  outline:2px solid var(--theme-accent);
+  outline-offset:2px;
+}
+.theme-toggle{
+  right:calc(var(--theme-close-right) + var(--theme-close-size) + 12px);
+}
+.theme-toggle svg{
+  width:19px;
+  height:19px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.8;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.control-tooltip{
+  position:absolute;
+  top:calc(100% + 8px);
+  left:50%;
+  width:max-content;
+  padding:6px 9px;
+  border-radius:5px;
+  background:rgba(28,28,30,.94);
+  color:#fff;
+  font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  font-size:12px;
+  font-weight:400;
+  line-height:1.25;
+  opacity:0;
+  pointer-events:none;
+  transform:translate(-50%,-3px);
+  transition:opacity .12s ease, transform .12s ease;
+}
+.control-tooltip::before{
+  content:"";
+  position:absolute;
+  left:50%;
+  bottom:100%;
+  transform:translateX(-50%);
+  border:5px solid transparent;
+  border-bottom-color:rgba(28,28,30,.94);
+}
+.theme-toggle:hover .control-tooltip,
+.theme-toggle:focus-visible .control-tooltip{
+  opacity:1;
+  transform:translate(-50%,0);
 }
 
 .header{
@@ -516,6 +564,16 @@ button{color:inherit}
 <div class="modal-stage">
   <div class="modal" id="modal">
     <div class="bg"></div>
+    <button class="theme-toggle" type="button" aria-label="切换主题">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3a9 9 0 1 0 0 18h1.35a1.85 1.85 0 0 0 0-3.7h-.72a1.4 1.4 0 0 1 0-2.8H15A6 6 0 0 0 15 3h-3Z"></path>
+        <circle cx="7.5" cy="10" r=".7" fill="currentColor" stroke="none"></circle>
+        <circle cx="9.5" cy="6.8" r=".7" fill="currentColor" stroke="none"></circle>
+        <circle cx="13.5" cy="6.3" r=".7" fill="currentColor" stroke="none"></circle>
+        <circle cx="16.5" cy="9" r=".7" fill="currentColor" stroke="none"></circle>
+      </svg>
+      <span class="control-tooltip" role="tooltip">切换主题</span>
+    </button>
     <button class="close" type="button" title="关闭" aria-label="关闭">×</button>
 
     <header class="header">
