@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "无印豆包 - 素材提取",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "在豆包/Dola/千问页面提取无水印图片和视频，支持一键下载",
   "minimum_chrome_version": "111",
   "icons": {
