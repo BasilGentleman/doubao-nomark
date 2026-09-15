@@ -1,51 +1,147 @@
 // ==UserScript==
-// @name         无印豆包 - 图片提取
+// @name         无印豆包 - 素材提取
 // @namespace    http://tampermonkey.net/
-// @version      1.0.3
-// @description  在豆包对话页面提取无水印图片
-// @description:en Extract watermark-free images from Doubao chat pages with one-click download
+// @version      1.0.16
+// @description  在豆包/Dola/千问对话页面提取无水印图片/视频，支持一键下载
+// @description:en Extract watermark-free images/videos from Doubao, Dola, and Qianwen with one-click download
 // @author       无印豆包
 // @homepage     https://github.com/ihmily/doubao-nomark
 // @supportURL   https://github.com/ihmily/doubao-nomark/issues
 // @updateURL    https://github.com/ihmily/doubao-nomark/raw/main/doubao-nomark.user.js
 // @downloadURL  https://github.com/ihmily/doubao-nomark/raw/main/doubao-nomark.user.js
 // @match        https://www.doubao.com/thread/*
+// @match        https://www.doubao.com/share/*
 // @match        https://www.doubao.com/chat/*
-// @grant        none
+// @match        https://www.dola.com/thread/*
+// @match        https://www.dola.com/share/*
+// @match        https://www.dola.com/chat/*
+// @match        https://www.qianwen.com/chat/*
+// @match        https://www.qianwen.com/share/chat/*
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      snssdk.com
+// @connect      *.snssdk.com
+// @connect      douyinvod.com
+// @connect      *.douyinvod.com
+// @connect      byteintlapi.com
+// @connect      *.byteintlapi.com
+// @connect      dola.com
+// @connect      *.dola.com
 // @license      MIT
 // @run-at       document-end
-// @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>📷</text></svg>
+// @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221em%22%20height%3D%221em%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20stroke-width%3D%221.5%22%3E%3Cpath%20d%3D%22M2.5%2013.5v-7h19v7c0%203.771%200%205.657-1.172%206.828S17.272%2021.5%2013.5%2021.5h-3c-3.771%200-5.657%200-6.828-1.172S2.5%2017.271%202.5%2013.5m0-7l.6-.8c1.178-1.57%201.767-2.355%202.611-2.778C6.556%202.5%207.537%202.5%209.5%202.5h5c1.963%200%202.944%200%203.789.422c.845.423%201.433%201.208%202.611%202.778l.6.8%22%2F%3E%3Cpath%20d%3D%22M15%2014.5s-2.21%203-3%203s-3-3-3-3m3%202.5v-6.5%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     console.log('%c[无印豆包] 脚本开始执行', 'color: #667eea; font-size: 14px; font-weight: bold');
-    console.log('[无印豆包] 当前 URL:', window.location.href);
-    console.log('[无印豆包] document.readyState:', document.readyState);
+    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const NativeReadableStream = pageWindow.ReadableStream || ReadableStream;
+    const NativeResponse = pageWindow.Response || Response;
+    const DOUBAO_HOSTS = new Set(['www.doubao.com', 'www.dola.com']);
+    console.log('[无印豆包] 当前 URL:', pageWindow.location.href);
 
-    let chatImages = [];
-    let floatingBtnElement = null;
-
-    function updateButtonCount() {
-        if (floatingBtnElement && window.location.pathname.includes('/chat/')) {
-            const countElement = floatingBtnElement.querySelector('.count');
-            if (countElement) {
-                countElement.textContent = chatImages.length;
-            }
-        }
+    function isDoubaoHost() {
+        return DOUBAO_HOSTS.has(pageWindow.location.hostname);
     }
 
-    const originalXHROpen = XMLHttpRequest.prototype.open;
-    const originalXHRSend = XMLHttpRequest.prototype.send;
-    
-    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+    function getDoubaoOrigin() {
+        return pageWindow.location.hostname === 'www.dola.com'
+            ? pageWindow.location.origin
+            : 'https://www.doubao.com';
+    }
+
+    function isDoubaoSharePage() {
+        return isDoubaoHost() && (
+            pageWindow.location.pathname.includes('/thread/')
+            || pageWindow.location.pathname.includes('/share/')
+        );
+    }
+
+    let chatImages = [];
+    let chatVideos = [];
+    let floatingBtnElement = null;
+    let mountObserver = null;
+    const processedFallbackApis = new Set();
+
+    const NOMARK_BUTTON_HOST_ID = 'doubao-nomark-button-host';
+    const QAAB_SALT_HEX = '4dd4c2e6b83162090e52b3c7a6733ba4'
+        + '1cb2462b829ab58a196b39db57177524'
+        + 'f49baf7f08e8d68d26a72e37c1a95a2f'
+        + '1f05a51892aef2949732b62a38aadd58';
+    const NOMARK_ICON_SVG = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24">
+            <path d="M0 0h24v24H0z" fill="none" />
+            <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5">
+                <path d="M2.5 13.5v-7h19v7c0 3.771 0 5.657-1.172 6.828S17.272 21.5 13.5 21.5h-3c-3.771 0-5.657 0-6.828-1.172S2.5 17.271 2.5 13.5m0-7l.6-.8c1.178-1.57 1.767-2.355 2.611-2.778C6.556 2.5 7.537 2.5 9.5 2.5h5c1.963 0 2.944 0 3.789.422c.845.423 1.433 1.208 2.611 2.778l.6.8" />
+                <path d="M15 14.5s-2.21 3-3 3s-3-3-3-3m3 2.5v-6.5" />
+            </g>
+        </svg>
+    `;
+    const DBX_BUTTON_CLASS = 'flex shrink-0 items-center justify-center font-[400] whitespace-nowrap select-none [&_svg]:shrink-0 text-[16px] leading-[24px] gap-[4px] rounded-dbx-sm p-[4px] transition-colors duration-150 ease-out bg-transparent hover:bg-dbx-fill-trans-10-hover [&:is(:where(:is([aria-haspopup="dialog"],[aria-haspopup="menu"])[data-state="open"]:not([data-slot="alert-dialog-trigger"])),:where(:is([aria-haspopup="dialog"],[aria-haspopup="menu"])[data-state="open"]:not([data-slot="alert-dialog-trigger"])_*))]:bg-dbx-fill-trans-10-hover outline-transparent outline-none [&_svg:not([class*="size-"])]:size-[18px] [&_svg[data-dbx-name=button-caret]:not([class*="size-"])]:size-[12px] relative h-fit cursor-pointer text-(--dbx-text-primary)';
+
+    function updateButtonCount() {
+        setButtonCount(chatImages.length + chatVideos.length);
+    }
+
+    function normalizeImageUrl(url) {
+        return typeof url === 'string' ? url.replace(/&amp;/g, '&') : '';
+    }
+
+    function addChatImage(imageInfo, logLabel = '[无印豆包] 获取到新图片') {
+        const url = normalizeImageUrl(imageInfo?.url);
+        if (!url) return false;
+
+        const width = imageInfo.width || 0;
+        const height = imageInfo.height || 0;
+        const existingImage = chatImages.find(img => img.url === url);
+        if (existingImage) {
+            if (!existingImage.width && width) existingImage.width = width;
+            if (!existingImage.height && height) existingImage.height = height;
+            return false;
+        }
+
+        chatImages.push({ url, width, height });
+        console.log(`${logLabel}:`, url, `${width} × ${height}`);
+        updateButtonCount();
+        return true;
+    }
+
+    function getCreationImageInfo(creation) {
+        const imageData = creation?.image?.image_ori_raw;
+        if (typeof imageData === 'string') {
+            return { url: imageData, width: 0, height: 0 };
+        }
+        if (imageData && typeof imageData === 'object' && imageData.url) {
+            return {
+                url: imageData.url,
+                width: imageData.width || 0,
+                height: imageData.height || 0
+            };
+        }
+        return null;
+    }
+
+    function addChatVideo(videoInfo) {
+        if (!videoInfo || !videoInfo.url) return;
+        if (chatVideos.find(v => v.vid === videoInfo.vid || v.url === videoInfo.url)) return;
+        chatVideos.push(videoInfo);
+        console.log('[无印豆包] 获取到新视频:', videoInfo.vid, videoInfo.url);
+        updateButtonCount();
+    }
+
+    const originalXHROpen = pageWindow.XMLHttpRequest.prototype.open;
+    const originalXHRSend = pageWindow.XMLHttpRequest.prototype.send;
+
+    pageWindow.XMLHttpRequest.prototype.open = function(method, url, ...args) {
         this._url = url;
         // console.log('[无印豆包] XHR open:', method, url);
         return originalXHROpen.apply(this, [method, url, ...args]);
     };
-    
-    XMLHttpRequest.prototype.send = function(...args) {
+
+    pageWindow.XMLHttpRequest.prototype.send = function(...args) {
         const url = this._url;
         this.addEventListener('load', function() {
             if (url && (url.includes('/im/chain/single'))) {
@@ -55,13 +151,15 @@
                     // console.log('[无印豆包] downlink_body 存在:', !!data?.downlink_body);
                     // console.log('[无印豆包] pull_singe_chain_downlink_body 存在:', !!data?.downlink_body?.pull_singe_chain_downlink_body);
                     // console.log('[无印豆包] messages 存在:', !!data?.downlink_body?.pull_singe_chain_downlink_body?.messages);
-                    
+
                     const messages = data?.downlink_body?.pull_singe_chain_downlink_body?.messages;
                     if (messages && Array.isArray(messages)) {
                         console.log('[无印豆包] 开始解析 messages，数量:', messages.length);
-                        parseChatImages(messages);
+                        parseChatHistoryImages(messages);
+                        processDoubaoFallbackVideos(data, this.responseText);
                     } else {
                         console.warn('[无印豆包] messages 不是数组或不存在');
+                        processDoubaoFallbackVideos(data, this.responseText);
                     }
                 } catch (e) {
                     console.error('[无印豆包] XHR 解析聊天数据失败:', e);
@@ -70,37 +168,133 @@
         });
         return originalXHRSend.apply(this, args);
     };
-    
+
     console.log('[无印豆包] XHR 拦截已安装');
 
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
+    const originalFetch = pageWindow.fetch;
+    pageWindow.fetch = async function(...args) {
         const url = args[0];
-        // console.log('[无印豆包] Fetch 请求:', url);
-        
-        if (url && url.includes('/chat/completion')) {
-            console.log('[无印豆包] ✨ 检测到 EventStream 请求:', url);
-            
+        const requestUrl = typeof url === 'string' ? url : (url?.url || '');
+
+        if (requestUrl && requestUrl.includes('/im/chain/single')) {
+            const response = await originalFetch.apply(this, args);
+            response.clone().text().then(text => {
+                try {
+                    const data = JSON.parse(text);
+                    const messages = data?.downlink_body?.pull_singe_chain_downlink_body?.messages;
+                    if (Array.isArray(messages)) {
+                        console.log('[无印豆包] Fetch 解析 chain/single messages，数量:', messages.length);
+                        parseChatHistoryImages(messages);
+                    }
+                    processDoubaoFallbackVideos(data, text);
+                } catch (e) {
+                    console.warn('[无印豆包] Fetch chain/single 解析失败:', e);
+                }
+            }).catch(() => {});
+            return response;
+        }
+
+        if (url && (typeof url === 'string') && url.includes('qianwen.com/api/v1/session/msg/list')) {
+            console.log('[无印豆包] 检测到千问 session msg list 请求:', url);
+            const response = await originalFetch.apply(this, args);
+            response.clone().json().then(data => {
+                const chats = data.data?.list || [];
+                for (const chat of chats) {
+                    const messages = chat?.response_messages || [];
+                    parseQianwenMessages(messages);
+                }
+            }).catch(() => {});
+            return response;
+        }
+
+        if (url && (typeof url === 'string') && url.includes('qianwen.com/api/v1/share/info')) {
+            console.log('[无印豆包] 检测到千问 share chat 请求:', url);
+            const response = await originalFetch.apply(this, args);
+            response.clone().json().then(data => {
+                const chats = data.data.session?.record_list || [];
+                for (const chat of chats) {
+                    const messages = chat?.response_messages || [];
+                    parseQianwenMessages(messages);
+                }
+            }).catch(() => {});
+            return response;
+        }
+
+        if (url && (typeof url === 'string') && url.includes('qianwen.com/api/v1/chat/snap')) {
+            console.log('[无印豆包] 检测到千问 EventStream 请求:', url);
+
             const response = await originalFetch.apply(this, args);
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            
-            const stream = new ReadableStream({
+
+            const stream = new NativeReadableStream({
+                async start(controller) {
+                    let buffer = '';
+                    let waitingForData = false;
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop();
+
+                        for (const line of lines) {
+                            if (line.trimEnd() === 'event:complete') {
+                                waitingForData = true;
+                            } else if (waitingForData && line.startsWith('data:')) {
+                                waitingForData = false;
+                                try {
+                                    const jsonStr = line.substring(5).trim();
+                                    const data = JSON.parse(jsonStr);
+                                    parseQianwenMessages(data?.data?.messages);
+                                } catch (e) {
+                                    console.warn('[无印豆包][千问] data 行解析失败:', e.message);
+                                }
+                            } else if (line.trim() === '') {
+                                waitingForData = false;
+                            }
+                        }
+
+                        controller.enqueue(value);
+                    }
+                    controller.close();
+                }
+            });
+
+            return new NativeResponse(stream, {
+                headers: response.headers,
+                status: response.status,
+                statusText: response.statusText
+            });
+        }
+
+        if (url && url.includes('/chat/completion')) {
+            console.log('[无印豆包] ✨ 检测到 EventStream 请求:', url);
+
+            const response = await originalFetch.apply(this, args);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            const stream = new NativeReadableStream({
                 async start(controller) {
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
-                        
+
                         const chunk = decoder.decode(value, { stream: true });
                         // console.log('[无印豆包] 收到数据块:', chunk.substring(0, 100));
-                        
+
                         const lines = chunk.split('\n');
                         for (const line of lines) {
                             if (line.startsWith('data: ')) {
                                 try {
                                     const jsonStr = line.substring(6);
-                                    if (jsonStr.includes('image_ori')) {
+                                    if (jsonStr.includes('image_ori') || jsonStr.includes('fallback_api')) {
                                         const data = JSON.parse(jsonStr);
+                                        if (jsonStr.includes('fallback_api')) {
+                                            processDoubaoFallbackVideos(data, jsonStr);
+                                        }
                                         if (data.event_data || data.patch_op) {
                                             parseStreamChunk(data);
                                         }
@@ -110,25 +304,50 @@
                                 }
                             }
                         }
-                        
+
                         // 传递数据给原始响应
                         controller.enqueue(value);
                     }
                     controller.close();
                 }
             });
-            
-            return new Response(stream, {
+
+            return new NativeResponse(stream, {
                 headers: response.headers,
                 status: response.status,
                 statusText: response.statusText
             });
         }
-        
+
         return originalFetch.apply(this, args);
     };
-    
+
     console.log('[无印豆包] Fetch 拦截已安装');
+
+    function parseQianwenMessages(messages) {
+        if (!Array.isArray(messages)) {
+            return;
+        }
+        for (const message of messages) {
+            if (message?.mime_type !== 'multi_load/iframe') continue;
+            const multiLoad = message?.meta_data?.multi_load;
+            if (!Array.isArray(multiLoad)) {
+                continue;
+            }
+            for (const item of multiLoad) {
+                const displayList = item?.content?.display_list;
+                if (!Array.isArray(displayList)) {
+                    continue;
+                }
+                for (const display of displayList) {
+                    const imageObj = display?.image?.[0];
+                    if (!imageObj?.url) continue;
+                    const { url, width = 0, height = 0 } = imageObj;
+                    addChatImage({ url, width, height }, '[无印豆包][千问] 获取到图片');
+                }
+            }
+        }
+    }
 
     function parseStreamChunk(data) {
         try {
@@ -136,9 +355,9 @@
                 return;
             }
 
-            if (data.patch_op) {
+            let creations = [];
 
-                var creations = [];
+            if (data.patch_op) {
 
                 for (const op of data.patch_op) {
                     if (
@@ -195,11 +414,11 @@
                     console.log('[无印豆包] 解析 event_data 失败:', e);
                     return;
                 }
-                
+
                 if (!eventData.message?.content) {
                     return;
                 }
-                
+
                 let messageContent;
                 try {
                     messageContent = JSON.parse(eventData.message.content);
@@ -211,31 +430,16 @@
                     return;
                 }
 
-                var creations = messageContent.creations;
+                creations = messageContent.creations;
             }
-            
 
-            
+
+
             for (const creation of creations) {
-                const imageData = creation.image?.image_ori_raw;
-                if (imageData) {
-                    let imageUrl = '';
-                    let width = 0;
-                    let height = 0;
-                    
-                    if (typeof imageData === 'string') {
-                        imageUrl = imageData;
-                    } else if (typeof imageData === 'object' && imageData.url) {
-                        imageUrl = imageData.url;
-                        width = imageData.width || 0;
-                        height = imageData.height || 0;
-                    }
-                    
-                    if (imageUrl && !chatImages.find(img => img.url === imageUrl)) {
-                        chatImages.push({ url: imageUrl, width, height });
-                        console.log('[无印豆包] 获取到新图片:', imageUrl, `${width} × ${height}`);
-                        updateButtonCount();
-                    }
+                if (creation?.video) {
+                    handleDoubaoCreationVideo(creation);
+                }else{
+                    addChatImage(getCreationImageInfo(creation));
                 }
             }
         } catch (e) {
@@ -243,10 +447,527 @@
         }
     }
 
-    function parseChatImages(messages) {
+    async function getDoubaoVideoInfo(vid) {
+        if (!vid) {
+            console.warn('[无印豆包] getDoubaoVideoInfo: vid 为空');
+            return null;
+        }
+
+        const params = {
+            version_code: '20800',
+            language: 'zh-CN',
+            device_platform: 'web',
+            aid: '497858',
+            real_aid: '497858',
+            pkg_type: 'release_version',
+            device_id: '',
+            pc_version: '2.51.7',
+            region: '',
+            sys_region: '',
+            samantha_web: '1',
+            'use-olympus-account': '1',
+            web_tab_id: '',
+        };
+
+        const queryString = new URLSearchParams(params).toString();
+        const doubaoOrigin = getDoubaoOrigin();
+        const apiUrl = `${doubaoOrigin}/samantha/media/get_play_info?${queryString}`;
+
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'origin': doubaoOrigin,
+                },
+                body: JSON.stringify({ key: vid }),
+            });
+
+            const result = await response.json();
+
+            if (!result || !result.data) {
+                console.warn('[无印豆包] API返回数据格式异常，可能链接已失效:', result);
+                return null;
+            }
+
+            const originalMediaInfo = result.data.original_media_info || {};
+            const meta = originalMediaInfo.meta || {};
+
+            const videoInfo = {
+                vid: vid,
+                width: meta.width || 0,
+                height: meta.height || 0,
+                definition: meta.definition || '',
+                duration: meta.duration || 0,
+                codec_type: meta.codec_type || '',
+                poster_url: result.data.poster_url || '',
+                url: originalMediaInfo.main_url || '',
+            };
+
+            console.log('[无印豆包] 获取无水印视频成功:', vid, videoInfo.url);
+            return videoInfo;
+        } catch (e) {
+            console.error('[无印豆包] 获取视频播放信息失败:', e);
+            return null;
+        }
+    }
+
+    function handleDoubaoCreationVideo(creation) {
+        processDoubaoFallbackVideos(creation, safeJsonStringify(creation));
+    }
+
+    function safeJsonStringify(value) {
+        try {
+            return JSON.stringify(value) || '';
+        } catch {
+            return '';
+        }
+    }
+
+    function processDoubaoFallbackVideos(json, rawBody = '') {
+        const fallbackApis = findDoubaoFallbackApis(json, rawBody);
+        if (!fallbackApis.length) return;
+
+        console.log('[无印豆包] 找到 fallback_api 数量:', fallbackApis.length);
+        removeLegacyDoubaoVideos();
+        for (const fallbackApi of fallbackApis) {
+            processDoubaoFallbackApi(fallbackApi);
+        }
+    }
+
+    function processDoubaoFallbackApi(fallbackApi) {
+        if (processedFallbackApis.has(fallbackApi)) return;
+        processedFallbackApis.add(fallbackApi);
+        getDoubaoVideoInfoFromFallbackApi(fallbackApi)
+            .then(info => addChatVideo(info))
+            .catch(error => console.warn('[无印豆包] fallback_api 解析失败:', error));
+    }
+
+    function extractShareFallbackApis(root) {
+        const apis = new Set();
+        const scripts = root.querySelectorAll(
+            'script[data-script-src="modern-run-router-data-fn"], script[data-script-src="modern-run-window-fn"]'
+        );
+        for (const script of scripts) {
+            const rawArgs = script.getAttribute('data-fn-args');
+            if (!rawArgs) continue;
+            try {
+                const data = JSON.parse(rawArgs.replace(/&quot;/g, '"'));
+                for (const api of findDoubaoFallbackApis(data, rawArgs)) apis.add(api);
+            } catch (_) { /* Ignore unrelated route data. */ }
+        }
+        return [...apis];
+    }
+
+    async function loadSharePageVideos() {
+        const apis = new Set(extractShareFallbackApis(document));
+        try {
+            const response = await originalFetch.call(pageWindow, pageWindow.location.href, {
+                credentials: 'include',
+            });
+            if (response.ok) {
+                const html = await response.text();
+                const Parser = pageWindow.DOMParser || DOMParser;
+                const page = new Parser().parseFromString(html, 'text/html');
+                for (const api of extractShareFallbackApis(page)) apis.add(api);
+            }
+        } catch (error) {
+            console.warn('[无印豆包] 获取分享页 HTML 失败:', error);
+        }
+
+        console.log('[无印豆包] 分享页 fallback_api 数量:', apis.size);
+        removeLegacyDoubaoVideos();
+        for (const fallbackApi of apis) processDoubaoFallbackApi(fallbackApi);
+    }
+
+    async function getDoubaoVideoInfoFromFallbackApi(fallbackApi) {
+        const apiUrl = replaceQueryParams(fallbackApi, {
+            channel: 'no',
+            codec_type: '8',
+            logo_type: 'unwatermarked',
+        });
+
+        const payload = await requestJson(apiUrl);
+        const data = getVideoData(payload);
+        const picked = pickMainUrlEntry(data);
+        if (!picked?.token) {
+            console.warn('[无印豆包] fallback_api 未找到 main_url:', apiUrl);
+            return null;
+        }
+
+        const videoUrl = await decodeMainUrl(picked.token, findKeySeedDeep(payload));
+        if (!videoUrl) {
+            console.warn('[无印豆包] fallback_api main_url 解码失败:', apiUrl);
+            return null;
+        }
+
+        const meta = picked.entry || {};
+        console.log('[无印豆包] fallback_api 获取无水印视频成功:', videoUrl);
+        return {
+            vid: data.vid || data.video_id || meta.vid || meta.video_id || apiUrl,
+            source: 'fallback_api',
+            width: Number(meta.vwidth || meta.width || data.vwidth || data.width || 0),
+            height: Number(meta.vheight || meta.height || data.vheight || data.height || 0),
+            definition: meta.definition || data.definition || '',
+            duration: Number(meta.duration || data.duration || 0),
+            codec_type: meta.codec_type || data.codec_type || '',
+            poster_url: data.poster_url || data.poster || '',
+            url: videoUrl,
+        };
+    }
+
+    function removeLegacyDoubaoVideos() {
+        const nextVideos = chatVideos.filter(video => video?.source === 'fallback_api');
+        if (nextVideos.length === chatVideos.length) return;
+
+        chatVideos = nextVideos;
+        updateButtonCount();
+        console.log('[无印豆包] 已移除旧 vid/get_play_info 视频，避免下载水印源');
+    }
+
+    function requestJson(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    headers: {
+                        accept: 'application/json,text/plain,*/*',
+                    },
+                    onload: (response) => {
+                        if (response.status < 200 || response.status >= 300) {
+                            reject(new Error(`请求失败: ${response.status}`));
+                            return;
+                        }
+                        try {
+                            const body = response.responseText || response.response;
+                            resolve(typeof body === 'string' ? JSON.parse(body) : body);
+                        } catch (error) {
+                            reject(error);
+                        }
+                    },
+                    onerror: () => reject(new Error('请求失败')),
+                    ontimeout: () => reject(new Error('请求超时')),
+                });
+                return;
+            }
+
+            originalFetch.call(pageWindow, url, {
+                method: 'GET',
+                credentials: 'omit',
+                headers: {
+                    accept: 'application/json,text/plain,*/*',
+                },
+            })
+                .then(response => response.json())
+                .then(resolve)
+                .catch(reject);
+        });
+    }
+
+    function findDoubaoFallbackApis(json, rawBody = '') {
+        const apis = new Set();
+
+        for (const value of findValuesByKey(json, 'fallback_api')) {
+            addFallbackApi(apis, value);
+        }
+
+        const body = typeof rawBody === 'string' ? rawBody : '';
+        const patterns = [
+            /fallback_api\\":\\"(.*?)\\"/g,
+            /"fallback_api"\s*:\s*"([^"]+)"/g,
+        ];
+
+        for (const pattern of patterns) {
+            let match = pattern.exec(body);
+            while (match) {
+                addFallbackApi(apis, decodeJsonEscapedFragment(match[1]));
+                match = pattern.exec(body);
+            }
+        }
+
+        return Array.from(apis);
+    }
+
+    function addFallbackApi(apis, value) {
+        if (typeof value !== 'string' || !value) return;
+
+        const url = decodeJsonEscapedFragment(value);
+        if (isHttpUrl(url)) {
+            apis.add(url);
+        }
+    }
+
+    function decodeJsonEscapedFragment(value) {
+        let text = value;
+        for (let index = 0; index < 3; index++) {
+            try {
+                const decoded = JSON.parse(`"${text.replace(/"/g, '\\"')}"`);
+                if (decoded === text) break;
+                text = decoded;
+            } catch {
+                break;
+            }
+        }
+        return text.replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+    }
+
+    function replaceQueryParams(url, params) {
+        const parsedUrl = new URL(url);
+        for (const [key, value] of Object.entries(params)) {
+            parsedUrl.searchParams.set(key, value);
+        }
+        return parsedUrl.toString();
+    }
+
+    function getVideoData(payload) {
+        const videoInfo = payload?.video_info || payload?.data?.video_info || payload;
+        const data = videoInfo?.data || videoInfo;
+        return data && typeof data === 'object' ? data : {};
+    }
+
+    function pickMainUrlEntry(data) {
+        const videoList = data?.video_list;
+        const entries = videoList && typeof videoList === 'object' && Object.keys(videoList).length
+            ? Object.values(videoList)
+            : [data];
+        let best = null;
+
+        for (const entry of entries) {
+            if (!entry || typeof entry !== 'object') continue;
+            const token = entry.main_url || entry.play_url || '';
+            if (typeof token !== 'string' || !token.trim()) continue;
+            const score = Number(entry.bitrate || entry.real_bitrate || 0)
+                + Number(entry.vwidth || entry.width || 0) * Number(entry.vheight || entry.height || 0);
+            if (!best || score > best.score) {
+                best = { token: token.trim(), score, entry };
+            }
+        }
+
+        return best;
+    }
+
+    function findKeySeedDeep(value, depth = 0) {
+        if (depth > 10 || value == null) return '';
+
+        if (typeof value === 'string') {
+            let match = value.match(/(?:^|[?&])key_seed=([^&"'<>\\\s]+)/i);
+            if (match) return decodeURIComponent(match[1]);
+            match = value.match(/["']key_seed["']\s*:\s*["']([^"']+)/i);
+            return match ? decodeURIComponent(match[1]) : '';
+        }
+
+        if (typeof value !== 'object') return '';
+
+        if (typeof value.key_seed === 'string' && value.key_seed.trim()) {
+            return value.key_seed.trim();
+        }
+
+        for (const item of Object.values(value)) {
+            const hit = findKeySeedDeep(item, depth + 1);
+            if (hit) return hit;
+        }
+
+        return '';
+    }
+
+    async function decodeMainUrl(token, keySeed = '') {
+        if (isHttpUrl(token)) return token;
+
+        const plainUrl = tryDecodeBase64Url(token);
+        if (plainUrl) return plainUrl;
+
+        if (token.startsWith('qAAB') && keySeed) {
+            return await decodeQaabToken(token, keySeed);
+        }
+
+        return '';
+    }
+
+    function tryDecodeBase64Url(token) {
+        const bytes = base64DecodeLoose(token);
+        if (!bytes) return '';
+        const text = asciiUrlFromBytes(bytes);
+        return isHttpUrl(text) ? text : '';
+    }
+
+    function base64DecodeLoose(text) {
+        const input = String(text || '').trim();
+        const variants = [
+            input,
+            input.replace(/[$@#]/g, char => ({ '$': '_', '@': '/', '#': '.' }[char])),
+            input.replace(/[$@#]/g, char => ({ '$': '+', '@': '/', '#': '=' }[char])),
+        ];
+        const seen = new Set();
+
+        for (const candidate of variants) {
+            if (!candidate || seen.has(candidate)) continue;
+            seen.add(candidate);
+            try {
+                const normalized = padBase64(candidate).replace(/-/g, '+').replace(/_/g, '/');
+                const binary = atob(normalized);
+                const bytes = new Uint8Array(binary.length);
+                for (let index = 0; index < binary.length; index++) {
+                    bytes[index] = binary.charCodeAt(index);
+                }
+                return bytes;
+            } catch {
+                // Try the next variant.
+            }
+        }
+
+        return null;
+    }
+
+    function padBase64(text) {
+        const pad = (4 - (text.length % 4)) % 4;
+        return text + '='.repeat(pad);
+    }
+
+    function asciiUrlFromBytes(bytes) {
+        if (!bytes || !bytes.length) return '';
+        for (const byte of bytes) {
+            if (byte !== 9 && byte !== 10 && byte !== 13 && (byte < 32 || byte > 126)) {
+                return '';
+            }
+        }
+        return new TextDecoder().decode(bytes);
+    }
+
+    async function decodeQaabToken(token, keySeed) {
+        const data = base64DecodeLoose(token);
+        const seed = base64DecodeLoose(keySeed);
+        if (!data || !seed) return '';
+
+        const digest1 = await crypto.subtle.digest('SHA-512', seed.slice(0, 32));
+        const salt = hexToBytes(QAAB_SALT_HEX);
+        const digest2Input = concatBytes(new Uint8Array(digest1), salt);
+        const digest2 = new Uint8Array(await crypto.subtle.digest('SHA-512', digest2Input));
+        const key = digest2.slice(0, 16);
+        const iv = digest2.slice(16, 32);
+        const attempts = [];
+
+        if (data.length >= 4 && data[0] === 0xa8 && data[1] === 0x00 && data[2] === 0x01 && data[3] === 0x00) {
+            attempts.push({ payload: data.slice(4), key, iv });
+            attempts.push({ payload: data.slice(4), key: iv, iv: key });
+            if (data.length > 36) {
+                attempts.push({ payload: data.slice(36), key, iv: data.slice(20, 36) });
+                attempts.push({ payload: data.slice(36), key, iv });
+            }
+        } else {
+            attempts.push({ payload: data, key, iv });
+        }
+
+        for (const attempt of attempts) {
+            const url = await decryptAesCbcUrl(attempt.payload, attempt.key, attempt.iv);
+            if (url) return url;
+        }
+
+        return '';
+    }
+
+    async function decryptAesCbcUrl(payload, keyBytes, ivBytes) {
+        if (!payload.length || payload.length % 16 !== 0) return '';
+
+        try {
+            const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-CBC', false, ['decrypt']);
+            const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, key, payload));
+            const direct = asciiUrlFromBytes(plain);
+            if (isHttpUrl(direct)) return direct;
+            const stripped = stripPkcs7(plain);
+            const url = asciiUrlFromBytes(stripped);
+            return isHttpUrl(url) ? url : '';
+        } catch {
+            return '';
+        }
+    }
+
+    function stripPkcs7(bytes) {
+        if (!bytes || !bytes.length) return new Uint8Array();
+        const pad = bytes[bytes.length - 1];
+        if (pad < 1 || pad > 16 || pad > bytes.length) return bytes;
+        for (let index = bytes.length - pad; index < bytes.length; index++) {
+            if (bytes[index] !== pad) return bytes;
+        }
+        return bytes.slice(0, bytes.length - pad);
+    }
+
+    function hexToBytes(hex) {
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let index = 0; index < bytes.length; index++) {
+            bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+        }
+        return bytes;
+    }
+
+    function concatBytes(first, second) {
+        const bytes = new Uint8Array(first.length + second.length);
+        bytes.set(first, 0);
+        bytes.set(second, first.length);
+        return bytes;
+    }
+
+    function findValuesByKey(value, targetKey) {
+        const values = [];
+        walkJsonAndStrings(value, (node) => {
+            if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+            if (Object.prototype.hasOwnProperty.call(node, targetKey)) {
+                values.push(node[targetKey]);
+            }
+        });
+        return values;
+    }
+
+    function walkJsonAndStrings(value, visitor, seen = new Set()) {
+        if (value == null) return;
+
+        if (typeof value === 'string') {
+            const parsed = parseJsonString(value);
+            if (parsed !== null) {
+                walkJsonAndStrings(parsed, visitor, seen);
+            }
+            return;
+        }
+
+        if (typeof value !== 'object' || seen.has(value)) return;
+
+        seen.add(value);
+        visitor(value);
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                walkJsonAndStrings(item, visitor, seen);
+            }
+            return;
+        }
+
+        for (const key of Object.keys(value)) {
+            walkJsonAndStrings(value[key], visitor, seen);
+        }
+    }
+
+    function parseJsonString(text) {
+        const trimmed = text.trim();
+        if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+            return null;
+        }
+
+        try {
+            return JSON.parse(trimmed);
+        } catch {
+            return null;
+        }
+    }
+
+    function isHttpUrl(url) {
+        return typeof url === 'string' && /^https?:\/\//i.test(url);
+    }
+
+    function parseChatHistoryImages(messages) {
         if (!Array.isArray(messages)) return;
-        
-        const newImages = [];
+
+        let addedCount = 0;
 
         try {
             for (const item of messages) {
@@ -255,28 +976,16 @@
                         const creationBlock = content.content?.creation_block;
                         if (!creationBlock || !Array.isArray(creationBlock.creations)) continue;
                         for (const creation of creationBlock.creations) {
-                            const imageData = creation.image?.image_ori_raw;
-                            if (imageData) {
-                                let imageUrl = '';
-                                let width = 0;
-                                let height = 0;
-                                
-                                if (typeof imageData === 'string') {
-                                    imageUrl = imageData;
-                                } else if (typeof imageData === 'object' && imageData.url) {
-                                    imageUrl = imageData.url;
-                                    width = imageData.width || 0;
-                                    height = imageData.height || 0;
-                                }
-                                
-                                if (imageUrl && !newImages.find(img => img.url === imageUrl)) {
-                                    newImages.push({ url: imageUrl, width, height });
-                                    console.log('[无印豆包] 找到图片:', imageUrl, `${width} × ${height}`);
+                            if (creation?.video) {
+                                handleDoubaoCreationVideo(creation);
+                            }else{
+                                if (addChatImage(getCreationImageInfo(creation), '[无印豆包] 找到图片')) {
+                                    addedCount++;
                                 }
                             }
                         }
                     }
-                    
+
                 } catch (e) {
                     console.log('[无印豆包] 解析消息失败:', e);
                     continue;
@@ -285,139 +994,111 @@
         } catch (e) {
             console.log('[无印豆包] 解析消息失败:', e);
         }
-        
-        if (newImages.length > 0) {
-            chatImages = newImages;
-            console.log('[无印豆包] 更新聊天图片，共', chatImages.length, '张');
-            updateButtonCount();
+
+        if (addedCount > 0) {
+            console.log('[无印豆包] 合并聊天图片，新增', addedCount, '张，共', chatImages.length, '张');
         }
     }
 
-    function extractImages() {
-        
-        if (window.location.pathname.includes('/chat/')) {
-            console.log('[无印豆包] 聊天界面，返回已缓存的', chatImages.length, '张图片');
-            return chatImages;
-        }
-        
+    function extractSharePageImages() {
         try {
             const imageList = [];
-            
-            const scriptElement = document.querySelector('script[data-script-src="modern-run-router-data-fn"]');
+
+            const addCreationMedia = (creation) => {
+                if (creation?.video) {
+                    handleDoubaoCreationVideo(creation);
+                    return;
+                }
+
+                const imageData = creation?.image?.image_ori_raw;
+                if (!imageData) return;
+
+                let imageUrl = '';
+                let width = 0;
+                let height = 0;
+
+                if (typeof imageData === 'string') {
+                    imageUrl = imageData.replace(/&amp;/g, '&');
+                } else if (typeof imageData === 'object' && imageData.url) {
+                    imageUrl = imageData.url.replace(/&amp;/g, '&');
+                    width = imageData.width || 0;
+                    height = imageData.height || 0;
+                }
+
+                if (imageUrl && !imageList.find(img => img.url === imageUrl)) {
+                    imageList.push({
+                        url: imageUrl,
+                        width: width,
+                        height: height
+                    });
+                    console.log('[无印豆包] 找到图片:', imageUrl, `${width} × ${height}`);
+                }
+            };
+
+            const parseContentBlock = (block) => {
+                const contentData = block.content_v2 || block.content;
+                if (!contentData) return null;
+                return typeof contentData === 'string' ? JSON.parse(contentData) : contentData;
+            };
+
+            const parseMessageSnapshot = (messageSnapshot) => {
+                if (!Array.isArray(messageSnapshot)) return;
+
+                console.log('[无印豆包] 找到消息列表，共', messageSnapshot.length, '条消息');
+
+                for (const message of messageSnapshot) {
+                    for (const block of message.content_block || []) {
+                        try {
+                            const contentData = parseContentBlock(block);
+                            const creations = contentData?.creation_block?.creations;
+                            if (!Array.isArray(creations)) continue;
+
+                            for (const creation of creations) {
+                                addCreationMedia(creation);
+                            }
+                        } catch (e) {
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            const parseRouterDataItem = (data) => {
+                if (typeof data === 'object' && data?.data?.message_snapshot?.message_list) {
+                    parseMessageSnapshot(data.data.message_snapshot.message_list);
+                    return;
+                }
+
+                if (Array.isArray(data) && data.length) {
+                    const routerDataFnArg = data[0]?.routerDataFnArgs?.[0];
+                    if (!routerDataFnArg) return;
+
+                    const routerData = typeof routerDataFnArg === 'string'
+                        ? JSON.parse(routerDataFnArg)
+                        : routerDataFnArg;
+                    parseMessageSnapshot(routerData?.data?.message_snapshot?.message_list);
+                }
+            };
+
+            const scriptElement = document.querySelector(
+                'script[data-script-src="modern-run-router-data-fn"], script[data-script-src="modern-run-window-fn"][data-fn-name="mergeLoaderData"]'
+            );
             if (scriptElement) {
                 const dataFnArgs = scriptElement.getAttribute('data-fn-args');
                 if (dataFnArgs) {
                     const jsonStr = dataFnArgs.replace(/&quot;/g, '"');
                     const jsonData = JSON.parse(jsonStr);
-                    
+                    processDoubaoFallbackVideos(jsonData, jsonStr);
+
                     for (const data of jsonData) {
-                        if (typeof data === 'object' && data?.data?.message_snapshot?.message_list) {
-                            const messageSnapshot = data.data.message_snapshot.message_list;
-                            console.log('[无印豆包] 找到消息列表，共', messageSnapshot.length, '条消息');
-                            
-                            for (const message of messageSnapshot) {
-                                for (const block of message.content_block || []) {
-                                    try {
-                                        const contentData = JSON.parse(block.content_v2);
-                                        if (contentData.creation_block?.creations) {
-                                            for (const creation of contentData.creation_block.creations) {
-                                                const imageData = creation.image?.image_ori_raw;
-                                                if (imageData) {
-                                                    let imageUrl = '';
-                                                    let width = 0;
-                                                    let height = 0;
-                                                    
-                                                    if (typeof imageData === 'string') {
-                                                        imageUrl = imageData;
-                                                    } else if (typeof imageData === 'object' && imageData.url) {
-                                                        imageUrl = imageData.url.replace(/&amp;/g, '&');
-                                                        width = imageData.width || 0;
-                                                        height = imageData.height || 0;
-                                                    }
-                                                    
-                                                    if (imageUrl && !imageList.find(img => img.url === imageUrl)) {
-                                                        imageList.push({
-                                                            url: imageUrl,
-                                                            width: width,
-                                                            height: height
-                                                        });
-                                                        console.log('[无印豆包] 找到图片:', imageUrl, `${width} × ${height}`);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } catch (e) {
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    console.log('[无印豆包] 提取完成，共找到', imageList.length, '张图片');
-                    return imageList;
-                }
-            }
-            
-            // 旧方法：兼容旧版页面结构
-            if (window._ROUTER_DATA) {
-                const loaderData = window._ROUTER_DATA.loaderData;
-                
-                let messageSnapshot = null;
-                
-                if (loaderData?.["thread_(token)/page"]?.data?.message_snapshot?.message_list) {
-                    messageSnapshot = loaderData["thread_(token)/page"].data.message_snapshot.message_list;
-                } else if (loaderData?.["routes/thread_(token)/page"]?.data?.message_snapshot?.message_list) {
-                    messageSnapshot = loaderData["routes/thread_(token)/page"].data.message_snapshot.message_list;
-                } else if (loaderData?.["thread/page"]?.data?.message_snapshot?.message_list) {
-                    messageSnapshot = loaderData["thread/page"].data.message_snapshot.message_list;
-                }
-
-                if (messageSnapshot) {
-                    console.log('[无印豆包] 找到消息列表，共', messageSnapshot.length, '条消息');
-
-                    for (const message of messageSnapshot) {
-                        for (const block of message.content_block || []) {
-                            try {
-                                const contentData = JSON.parse(block.content_v2);
-                                if (contentData.creation_block?.creations) {
-                                    for (const creation of contentData.creation_block.creations) {
-                                        const imageData = creation.image?.image_ori_raw;
-                                        if (imageData) {
-                                            let imageUrl = '';
-                                            let width = 0;
-                                            let height = 0;
-                                            
-                                            if (typeof imageData === 'string') {
-                                                imageUrl = imageData;
-                                            } else if (typeof imageData === 'object' && imageData.url) {
-                                                imageUrl = imageData.url;
-                                                width = imageData.width || 0;
-                                                height = imageData.height || 0;
-                                            }
-                                            
-                                            if (imageUrl && !imageList.find(img => img.url === imageUrl)) {
-                                                imageList.push({
-                                                    url: imageUrl,
-                                                    width: width,
-                                                    height: height
-                                                });
-                                                console.log('[无印豆包] 找到图片:', imageUrl, `${width} × ${height}`);
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (e) {
-                                continue;
-                            }
-                        }
+                        parseRouterDataItem(data);
                     }
 
                     console.log('[无印豆包] 提取完成，共找到', imageList.length, '张图片');
                     return imageList;
                 }
             }
-            
+
             console.error('[无印豆包] 未找到任何可用的数据源');
             return [];
         } catch (error) {
@@ -426,81 +1107,398 @@
         }
     }
 
-    async function downloadImage(url, filename) {
-        try {
-            console.log('[无印豆包] 开始下载:', url);
-            
-            const response = await fetch(url);
-            const blob = await response.blob();
-            
-            const blobUrl = URL.createObjectURL(blob);
-            
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
-            
-            console.log('[无印豆包] 下载完成:', filename);
-        } catch (error) {
-            console.error('[无印豆包] 下载失败:', error);
-            alert('下载失败，请重试');
+    function extractImages() {
+
+        if (isDoubaoHost() && pageWindow.location.pathname.includes('/chat/')) {
+            console.log('[无印豆包] 豆包聊天界面，返回已缓存的', chatImages.length, '张图片');
+            return chatImages;
+        } else if (pageWindow.location.hostname.includes('qianwen.com') && pageWindow.location.pathname.includes('/chat/')) {
+            return chatImages;
+        }else{
+            const images = extractSharePageImages();
+            chatImages = images;
+            console.log('[无印豆包] 豆包分享界面，返回已缓存的', images.length, '张图片');
+            return images;
         }
     }
 
+    function extractVideos() {
+        console.log('[无印豆包] 当前视频缓存数:', chatVideos.length);
+        return chatVideos;
+    }
+
+    function createDownloadTask(url, filename) {
+        let settled = false;
+        let rejectDownload = null;
+        let abortDownload = null;
+
+        const promise = new Promise((resolve, reject) => {
+            rejectDownload = reject;
+
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                console.log('[无印豆包] 下载完成:', filename);
+                resolve();
+            };
+
+            const fail = (error) => {
+                if (settled) return;
+                settled = true;
+                console.error('[无印豆包] 下载失败:', error);
+                reject(error);
+            };
+
+            console.log('[无印豆包] 开始下载:', url);
+
+            if (typeof GM_download === 'function') {
+                try {
+                    const download = GM_download({
+                        url,
+                        name: filename,
+                        saveAs: false,
+                        onload: finish,
+                        onerror: fail,
+                        ontimeout: () => fail(new Error('下载超时')),
+                    });
+
+                    if (download && typeof download.abort === 'function') {
+                        abortDownload = () => download.abort();
+                    }
+                } catch (error) {
+                    fail(error);
+                }
+                return;
+            }
+
+            const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            abortDownload = () => controller?.abort();
+
+            fetch(url, { signal: controller?.signal })
+                .then(response => response.blob())
+                .then(blob => {
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+                    finish();
+                })
+                .catch(fail);
+        });
+
+        return {
+            promise,
+            abort() {
+                if (settled) return;
+                settled = true;
+                try {
+                    if (abortDownload) abortDownload();
+                } catch (error) {
+                    console.warn('[无印豆包] 取消下载失败:', error);
+                }
+                rejectDownload(new Error('下载已取消'));
+            },
+        };
+    }
+
+    async function downloadImage(url, filename) {
+        try {
+            await createDownloadTask(url, filename).promise;
+            return true;
+        } catch (error) {
+            if (error?.message === '下载已取消') return false;
+            alert('下载失败，请重试');
+            return false;
+        }
+    }
+
+    function getMediaExtension(url, type) {
+        try {
+            const pathname = new URL(url, pageWindow.location.href).pathname;
+            const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+            if (match) return `.${match[1].toLowerCase()}`;
+        } catch (e) {
+            // Ignore malformed URLs and fall back to a safe default extension.
+        }
+        return type === 'video' ? '.mp4' : '.png';
+    }
+
+    function getDownloadFilename(type, index, url) {
+        const prefix = type === 'video' ? 'doubao_video' : 'doubao_image';
+        return `${prefix}_${index + 1}${getMediaExtension(url, type)}`;
+    }
+
+    function fetchImageBlobWithGM(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest 不可用'));
+                return;
+            }
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                onload: (response) => {
+                    if (response.status >= 200 && response.status < 300 && response.response) {
+                        resolve(response.response);
+                        return;
+                    }
+                    reject(new Error(`图片请求失败: ${response.status}`));
+                },
+                onerror: () => reject(new Error('图片请求失败')),
+                ontimeout: () => reject(new Error('图片请求超时')),
+            });
+        });
+    }
+
+    async function fetchImageBlob(url) {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`图片请求失败: ${response.status}`);
+            }
+            return await response.blob();
+        } catch (error) {
+            console.warn('[无印豆包] fetch 读取图片失败，尝试 GM_xmlhttpRequest:', error);
+            return fetchImageBlobWithGM(url);
+        }
+    }
+
+    function convertBlobToPng(blob) {
+        if (blob.type === 'image/png') {
+            return Promise.resolve(blob);
+        }
+
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            const objectUrl = URL.createObjectURL(blob);
+
+            img.onload = () => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth || img.width;
+                    canvas.height = img.naturalHeight || img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    canvas.toBlob((pngBlob) => {
+                        URL.revokeObjectURL(objectUrl);
+                        if (pngBlob) {
+                            resolve(pngBlob);
+                        } else {
+                            reject(new Error('图片转换失败'));
+                        }
+                    }, 'image/png');
+                } catch (error) {
+                    URL.revokeObjectURL(objectUrl);
+                    reject(error);
+                }
+            };
+
+            img.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                reject(new Error('图片加载失败'));
+            };
+
+            img.src = objectUrl;
+        });
+    }
+
+    async function copyImageToClipboard(url) {
+        if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+            throw new Error('当前浏览器不支持复制图片到剪贴板');
+        }
+
+        const imageBlob = await fetchImageBlob(url);
+        const pngBlob = await convertBlobToPng(imageBlob);
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': pngBlob })
+        ]);
+    }
+
+    function isOwnElement(el) {
+        if (!el) return false;
+        return Boolean(el.closest && (
+            el.closest(`#${NOMARK_BUTTON_HOST_ID}`) ||
+            el.closest('#doubao-nomark-modal')
+        ));
+    }
+
+    function isVisible(el) {
+        if (!el || !el.isConnected || isOwnElement(el)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+            return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0
+            && rect.top < window.innerHeight && rect.left < window.innerWidth;
+    }
+
+    function findTopBarMount() {
+        const headerLeftButton = Array.from(document.querySelectorAll('button[data-dbx-name="button"]')).find(button => {
+            if (!isVisible(button)) return false;
+
+            const container = button.parentElement;
+            if (!container || !container.matches('div.flex-row.flex')) return false;
+
+            const className = String(container.className || '');
+            if (!className.includes('gap-8')) return false;
+            if (!className.includes('overflow-hidden') && !className.includes('pl-g-header-left-padding')) return false;
+
+            const rect = container.getBoundingClientRect();
+            return rect.top < 100 && rect.height > 20 && rect.height < 80;
+        });
+
+        return headerLeftButton?.parentElement || null;
+    }
+
+    function getNomarkButtonHost() {
+        return document.getElementById(NOMARK_BUTTON_HOST_ID) ||
+            floatingBtnElement?.closest(`#${NOMARK_BUTTON_HOST_ID}`) ||
+            null;
+    }
+
+    function mountNomarkButtonHost() {
+        const buttonHost = getNomarkButtonHost();
+        if (!buttonHost || !document.body) return;
+
+        const mount = findTopBarMount();
+        if (mount) {
+            mount.classList.remove('overflow-hidden');
+            mount.style.overflow = 'visible';
+
+            const nativeButtons = Array.from(mount.children).filter(child => {
+                return child.matches?.('button[data-dbx-name="button"]') && !isOwnElement(child);
+            });
+            const anchor = nativeButtons[nativeButtons.length - 1];
+            const nextNode = anchor?.nextSibling || null;
+
+            if (buttonHost.parentElement !== mount || buttonHost.previousSibling !== anchor) {
+                mount.insertBefore(buttonHost, nextNode);
+            }
+            buttonHost.classList.remove('fallback');
+            return;
+        }
+
+        if (buttonHost.parentElement !== document.body) {
+            document.body.appendChild(buttonHost);
+        }
+        buttonHost.classList.add('fallback');
+    }
+
+    function startMountObserver() {
+        if (mountObserver || !document.documentElement) return;
+
+        mountObserver = new MutationObserver(() => {
+            const buttonHost = getNomarkButtonHost();
+            const mount = findTopBarMount();
+            if (mount) {
+                mount.classList.remove('overflow-hidden');
+                mount.style.overflow = 'visible';
+            }
+            if (!buttonHost || !buttonHost.isConnected || buttonHost.classList.contains('fallback')) {
+                mountNomarkButtonHost();
+            }
+        });
+        mountObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    function setButtonCount(count) {
+        if (!floatingBtnElement) return;
+        const countElement = floatingBtnElement.querySelector('.count');
+        if (!countElement) return;
+
+        const totalCount = Number(count) || 0;
+        countElement.textContent = String(totalCount);
+        countElement.classList.toggle('show', totalCount > 0);
+    }
+
     function createFloatingButton() {
+        if (document.documentElement.dataset.doubaoNomarkPanel) {
+            console.log('[无印豆包] 检测到浏览器扩展，跳过油猴界面初始化');
+            return;
+        }
+        if (document.getElementById(NOMARK_BUTTON_HOST_ID)) return;
+
         const button = document.createElement('div');
         button.innerHTML = `
             <style>
                 * {
                     box-sizing: border-box;
                 }
-                
-                #doubao-nomark-btn {
+
+                #${NOMARK_BUTTON_HOST_ID} {
+                    position: relative;
+                    z-index: 2147483646;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex-shrink: 0;
+                    line-height: 1;
+                    overflow: visible;
+                    color: var(--dbx-text-primary, currentColor);
+                }
+
+                #${NOMARK_BUTTON_HOST_ID}.fallback {
                     position: fixed;
                     right: 24px;
                     bottom: 24px;
-                    z-index: 9999;
+                }
+
+                #${NOMARK_BUTTON_HOST_ID}.fallback #doubao-nomark-btn {
                     width: 48px;
                     height: 48px;
                     background: #ffffff;
                     border: 1px solid #e0e0e0;
                     border-radius: 8px;
-                    cursor: pointer;
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
                     display: flex;
                     align-items: center;
                     justify-content: center;
                     font-size: 20px;
-                    transition: all 0.2s ease;
-                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+                    transition: border-color 0.2s ease, box-shadow 0.2s ease;
                 }
-                
-                #doubao-nomark-btn:hover {
+
+                #${NOMARK_BUTTON_HOST_ID}.fallback #doubao-nomark-btn:hover {
                     border-color: #1f1f1f;
                     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
                 }
-                
+
+                #doubao-nomark-btn {
+                    overflow: visible;
+                    color: var(--dbx-text-primary, currentColor);
+                }
+
                 #doubao-nomark-btn .count {
                     position: absolute;
-                    top: -6px;
+                    top: -7px;
                     right: -6px;
-                    min-width: 20px;
-                    height: 20px;
-                    padding: 0 6px;
-                    background: #1f1f1f;
+                    z-index: 1;
+                    display: none;
+                    min-width: 13px;
+                    height: 13px;
+                    padding: 0 3px;
+                    background: #ff4d4f;
                     color: #ffffff;
-                    border-radius: 10px;
-                    font-size: 11px;
+                    border-radius: 999px;
+                    font: 600 8px/13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
                     font-weight: 600;
-                    display: flex;
                     align-items: center;
                     justify-content: center;
-                    line-height: 1;
+                    text-align: center;
+                    pointer-events: none;
+                    box-shadow: 0 0 0 1.5px var(--dbx-bg-base, #ffffff);
                 }
-                
+
+                #doubao-nomark-btn .count.show {
+                    display: flex;
+                }
+
                 #doubao-nomark-modal {
                     position: fixed;
                     top: 0;
@@ -514,71 +1512,113 @@
                     justify-content: center;
                     animation: fadeIn 0.2s ease;
                 }
-                
+
                 @keyframes fadeIn {
                     from { opacity: 0; }
                     to { opacity: 1; }
                 }
-                
+
                 #doubao-nomark-modal.show {
                     display: flex;
                 }
-                
+
+                #doubao-nomark-image-preview {
+                    position: fixed;
+                    inset: 0;
+                    z-index: 10001;
+                    display: none;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 16px;
+                    background: rgba(0, 0, 0, 0.86);
+                    cursor: zoom-out;
+                }
+
+                #doubao-nomark-image-preview.show {
+                    display: flex;
+                }
+
+                #doubao-nomark-image-preview img {
+                    width: auto;
+                    height: auto;
+                    max-width: calc(100vw - 32px);
+                    max-height: calc(100vh - 32px);
+                    object-fit: contain;
+                    display: block;
+                    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.36);
+                    pointer-events: none;
+                }
+
                 .modal-content {
                     background: #ffffff;
                     border-radius: 12px;
-                    width: 90%;
-                    max-width: 1000px;
+                    width: 888px;
+                    max-width: calc(100vw - 48px);
                     max-height: 85vh;
                     display: flex;
                     flex-direction: column;
                     overflow: hidden;
                     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
                     animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+                    font-size: 12px;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 }
-                
+
                 @keyframes slideUp {
-                    from { 
-                        transform: translateY(20px); 
-                        opacity: 0; 
+                    from {
+                        transform: translateY(20px);
+                        opacity: 0;
                     }
-                    to { 
-                        transform: translateY(0); 
-                        opacity: 1; 
+                    to {
+                        transform: translateY(0);
+                        opacity: 1;
                     }
                 }
-                
-                .modal-header {
-                    padding: 24px 32px;
+
+                .modal-topbar {
+                    padding: 10px 20px 0;
                     border-bottom: 1px solid #e0e0e0;
                     display: flex;
                     align-items: center;
                     justify-content: space-between;
+                    gap: 12px;
                 }
-                
-                .modal-header h3 {
-                    margin: 0;
-                    font-size: 18px;
-                    font-weight: 600;
-                    color: #1f1f1f;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                }
-                
-                .modal-header .subtitle {
-                    font-size: 13px;
-                    color: #6b6b6b;
-                    margin-top: 4px;
-                    font-weight: 400;
-                }
-                
-                .modal-header-left {
+
+                .modal-actions {
                     display: flex;
-                    flex-direction: column;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
                 }
-                
+
+                .top-action-btn {
+                    height: 26px;
+                    padding: 0 8px;
+                    border: 1px solid #e0e0e0;
+                    border-radius: 6px;
+                    background: #ffffff;
+                    color: #1f1f1f;
+                    font-size: 12px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                    white-space: nowrap;
+                }
+
+                .top-action-btn:hover {
+                    background: #f7f7f7;
+                    border-color: #1f1f1f;
+                }
+
+                .top-action-btn.danger {
+                    background: #fff7ed;
+                    border-color: #fdba74;
+                    color: #9a3412;
+                }
+
                 .close-btn {
-                    width: 32px;
-                    height: 32px;
+                    width: 26px;
+                    height: 26px;
                     background: transparent;
                     border: 1px solid #e0e0e0;
                     border-radius: 6px;
@@ -587,204 +1627,356 @@
                     align-items: center;
                     justify-content: center;
                     color: #6b6b6b;
-                    font-size: 20px;
+                    font-size: 12px;
                     transition: all 0.2s ease;
                     line-height: 1;
                 }
-                
+
                 .close-btn:hover {
                     background: #f7f7f7;
                     border-color: #1f1f1f;
                     color: #1f1f1f;
                 }
-                
+
                 .modal-body {
-                    padding: 24px 32px;
+                    padding: 16px 20px;
                     overflow-y: auto;
                     flex: 1;
                 }
-                
+
+                .media-tabs {
+                    display: flex;
+                    gap: 8px;
+                    padding: 0;
+                    background: #ffffff;
+                }
+
+                .media-tab {
+                    padding: 6px 12px;
+                    border: 1px solid #e0e0e0;
+                    border-bottom-color: transparent;
+                    border-radius: 8px 8px 0 0;
+                    background: #f7f7f7;
+                    color: #6b6b6b;
+                    font-size: 12px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                }
+
+                .media-tab:hover {
+                    color: #1f1f1f;
+                    background: #ffffff;
+                }
+
+                .media-tab.active {
+                    color: #1f1f1f;
+                    background: #ffffff;
+                    border-color: #d0d0d0;
+                    box-shadow: 0 -1px 0 #ffffff inset;
+                }
+
                 .modal-body::-webkit-scrollbar {
                     width: 6px;
                 }
-                
+
                 .modal-body::-webkit-scrollbar-track {
                     background: transparent;
                 }
-                
+
                 .modal-body::-webkit-scrollbar-thumb {
                     background: #d0d0d0;
                     border-radius: 3px;
                 }
-                
+
                 .modal-body::-webkit-scrollbar-thumb:hover {
                     background: #a0a0a0;
                 }
-                
-                .image-grid {
+
+                .media-grid {
+                    --media-card-width: 160px;
+                    --media-preview-height: 160px;
                     display: grid;
-                    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-                    gap: 16px;
+                    grid-template-columns: repeat(5, var(--media-card-width));
+                    justify-content: start;
+                    gap: 12px;
                 }
-                
-                .image-item {
+
+                .media-card {
                     position: relative;
                     border-radius: 8px;
                     overflow: hidden;
                     border: 1px solid #e0e0e0;
                     background: #fafafa;
                     transition: all 0.2s ease;
+                    display: flex;
+                    flex-direction: column;
                 }
-                
-                .image-item:hover {
+
+                .media-card:hover {
                     border-color: #1f1f1f;
                 }
-                
-                .image-item img {
+
+                .media-preview {
+                    position: relative;
                     width: 100%;
-                    height: 220px;
+                    height: var(--media-preview-height);
+                    display: block;
+                    background: #000;
+                    cursor: pointer;
+                }
+
+                .media-preview video {
+                    width: 100%;
+                    height: var(--media-preview-height);
+                    object-fit: contain;
+                    display: block;
+                    background: #000;
+                }
+
+                .video-click-zone {
+                    position: absolute;
+                    left: 0;
+                    width: 100%;
+                    height: 50%;
+                    z-index: 2;
+                }
+
+                .video-click-top {
+                    top: 0;
+                    cursor: pointer;
+                }
+
+                .video-click-bottom {
+                    bottom: 0;
+                    cursor: pointer;
+                }
+
+                .video-control-overlay {
+                    position: absolute;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 6px;
+                    min-height: 34px;
+                    padding: 6px;
+                    background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+                    color: #ffffff;
+                    opacity: 0;
+                    transform: translateY(4px);
+                    transition: opacity 0.16s ease, transform 0.16s ease;
+                    pointer-events: none;
+                }
+
+                .video-click-bottom:hover .video-control-overlay {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+
+                .video-play-indicator {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 999px;
+                    background: rgba(255, 255, 255, 0.88);
+                    color: #111111;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 12px;
+                    font-weight: 700;
+                    line-height: 1;
+                }
+
+                .video-meta {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 6px;
+                    padding: 6px 8px;
+                    font-size: 12px;
+                    color: #6b6b6b;
+                    background: #ffffff;
+                    border-top: 1px solid #f0f0f0;
+                }
+
+                .video-meta-item {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 4px;
+                }
+
+                .video-actions {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 8px;
+                    background: #ffffff;
+                    border-top: 1px solid #e0e0e0;
+                }
+
+                .media-preview img {
+                    width: 100%;
+                    height: var(--media-preview-height);
                     object-fit: cover;
                     display: block;
                 }
-                
+
                 .image-info {
                     position: absolute;
                     top: 8px;
                     right: 8px;
-                    padding: 4px 8px;
+                    padding: 3px 6px;
                     background: rgba(0, 0, 0, 0.6);
                     border-radius: 4px;
-                    font-size: 11px;
+                    font-size: 12px;
                     color: #ffffff;
                     font-weight: 500;
                     opacity: 0;
                     transition: opacity 0.2s ease;
                 }
-                
-                .image-item:hover .image-info {
+
+                .media-card:hover .image-info {
                     opacity: 1;
                 }
-                
-                .image-actions {
-                    display: flex;
-                    gap: 8px;
-                    padding: 10px;
-                    background: #ffffff;
-                    border-top: 1px solid #e0e0e0;
-                }
-                
+
                 .action-btn {
-                    flex: 1;
-                    padding: 6px 12px;
+                    flex: 0 0 auto;
+                    min-width: 52px;
+                    padding: 6px 10px;
                     border: 1px solid #e0e0e0;
                     border-radius: 4px;
                     background: #ffffff;
                     color: #1f1f1f;
-                    font-size: 13px;
+                    font-size: 12px;
                     font-weight: 500;
                     cursor: pointer;
                     transition: all 0.2s ease;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 }
-                
+
+                .media-select {
+                    width: 14px;
+                    height: 14px;
+                    margin: 0 0 0 auto;
+                    accent-color: #1f1f1f;
+                    cursor: pointer;
+                }
+
                 .action-btn:hover {
                     background: #f7f7f7;
                     border-color: #1f1f1f;
                 }
-                
+
                 .action-btn.success {
                     background: #f0fdf4;
                     border-color: #86efac;
                     color: #166534;
                 }
-                
+
                 .empty-state {
                     text-align: center;
-                    padding: 80px 20px;
+                    padding: 56px 20px;
                     color: #a0a0a0;
                 }
-                
+
                 .empty-state-icon {
                     font-size: 48px;
                     margin-bottom: 12px;
                     opacity: 0.5;
                 }
-                
+
                 .empty-state-text {
-                    font-size: 15px;
+                    font-size: 12px;
                     color: #6b6b6b;
                     font-weight: 500;
                 }
-                
+
                 .empty-state-desc {
-                    font-size: 13px;
+                    font-size: 12px;
                     color: #a0a0a0;
                     margin-top: 4px;
                 }
-                
+
                 .modal-footer {
-                    padding: 16px 32px;
+                    padding: 8px 20px;
                     border-top: 1px solid #e0e0e0;
                     display: flex;
                     justify-content: center;
                     align-items: center;
-                    gap: 12px;
+                    gap: 8px;
                     background: #fafafa;
                 }
-                
+
                 .footer-divider {
                     width: 1px;
                     height: 12px;
                     background: #e0e0e0;
                 }
-                
+
                 .footer-text {
                     color: #a0a0a0;
-                    font-size: 13px;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    font-size: 12px;
                 }
-                
+
                 .footer-link {
                     display: inline-flex;
                     align-items: center;
                     gap: 6px;
                     color: #6b6b6b;
                     text-decoration: none;
-                    font-size: 13px;
+                    font-size: 12px;
                     transition: all 0.15s ease;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 }
-                
+
                 .footer-link:hover {
                     color: #1f1f1f;
                 }
-                
+
                 .footer-link svg {
                     width: 16px;
                     height: 16px;
                     opacity: 0.7;
                     transition: opacity 0.15s ease;
                 }
-                
+
                 .footer-link:hover svg {
                     opacity: 1;
                 }
+
+                @media (max-width: 920px) {
+                    .modal-content {
+                        width: calc(100vw - 24px);
+                    }
+
+                    .media-grid {
+                        grid-template-columns: repeat(auto-fill, minmax(var(--media-card-width), var(--media-card-width)));
+                    }
+                }
             </style>
-            <div id="doubao-nomark-btn" title="提取无水印图片">
-                📷
-                <span class="count">0</span>
+            <div id="${NOMARK_BUTTON_HOST_ID}">
+                <button id="doubao-nomark-btn" type="button" title="提取无水印素材" aria-label="提取无水印素材" data-disabled="false" data-loading="false" data-dbx-name="button" class='${DBX_BUTTON_CLASS}'>
+                    <div class="min-w-0 truncate">${NOMARK_ICON_SVG}</div>
+                    <div class="absolute inset-[-6px] opacity-0"></div>
+                    <span class="count" aria-live="polite">0</span>
+                </button>
             </div>
             <div id="doubao-nomark-modal">
                 <div class="modal-content">
-                    <div class="modal-header">
-                        <div class="modal-header-left">
-                            <h3>无水印图片</h3>
-                            <div class="subtitle" id="image-subtitle">共 0 张图片</div>
+                    <div class="modal-topbar">
+                        <div class="media-tabs" role="tablist" aria-label="素材类型">
+                            <button class="media-tab active" type="button" data-tab="image" role="tab" aria-selected="true">图片(0)</button>
+                            <button class="media-tab" type="button" data-tab="video" role="tab" aria-selected="false">视频(0)</button>
                         </div>
-                        <button class="close-btn">×</button>
+                        <div class="modal-actions">
+                            <button class="top-action-btn btn-select-all" type="button">全选</button>
+                            <button class="top-action-btn btn-clear-selection" type="button">取消选择</button>
+                            <button class="top-action-btn btn-batch-download" type="button">批量下载</button>
+                            <button class="close-btn" type="button">×</button>
+                        </div>
                     </div>
                     <div class="modal-body">
-                        <div class="image-grid" id="image-container"></div>
+                        <div class="media-grid" id="media-container"></div>
                     </div>
                     <div class="modal-footer">
                         <a href="https://github.com/ihmily/doubao-nomark" target="_blank" class="footer-link">
@@ -802,118 +1994,445 @@
 
         document.body.appendChild(button);
 
+        let modal = document.getElementById('doubao-nomark-modal');
+        if (modal && modal.parentElement !== document.body) {
+            document.body.appendChild(modal);
+        }
+
         floatingBtnElement = document.getElementById('doubao-nomark-btn');
+        mountNomarkButtonHost();
+        startMountObserver();
 
         const floatingBtn = floatingBtnElement;
-        const modal = document.getElementById('doubao-nomark-modal');
         const closeBtn = modal.querySelector('.close-btn');
-        const imageContainer = document.getElementById('image-container');
-        const imageSubtitle = document.getElementById('image-subtitle');
+        const mediaContainer = document.getElementById('media-container');
+        const tabButtons = modal.querySelectorAll('.media-tab');
+        const selectAllBtn = modal.querySelector('.btn-select-all');
+        const clearSelectionBtn = modal.querySelector('.btn-clear-selection');
+        const batchDownloadBtn = modal.querySelector('.btn-batch-download');
 
         let currentImages = [];
+        let currentVideos = [];
+        let activeTab = 'image';
+        let batchDownloading = false;
+        let batchCancelRequested = false;
+        let currentDownloadTask = null;
+        let imagePreviewOverlay = null;
+
+        function closeImagePreview() {
+            if (imagePreviewOverlay) {
+                imagePreviewOverlay.classList.remove('show');
+            }
+        }
+
+        function getImagePreviewOverlay() {
+            if (imagePreviewOverlay) return imagePreviewOverlay;
+
+            imagePreviewOverlay = document.createElement('div');
+            imagePreviewOverlay.id = 'doubao-nomark-image-preview';
+            imagePreviewOverlay.innerHTML = '<img alt="图片预览">';
+            imagePreviewOverlay.addEventListener('click', closeImagePreview);
+            document.body.appendChild(imagePreviewOverlay);
+            return imagePreviewOverlay;
+        }
+
+        function showImagePreview(image) {
+            if (!image?.url) return;
+
+            const overlay = getImagePreviewOverlay();
+            const img = overlay.querySelector('img');
+            img.src = image.url;
+            img.alt = '图片预览';
+            overlay.classList.add('show');
+        }
+
+        function formatDuration(sec) {
+            if (!sec || sec <= 0) return '';
+            const s = Math.floor(sec);
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return `${m}:${r.toString().padStart(2, '0')}`;
+        }
+
+        function updateTabLabels() {
+            tabButtons.forEach(btn => {
+                const isImageTab = btn.dataset.tab === 'image';
+                btn.textContent = isImageTab ? `图片(${currentImages.length})` : `视频(${currentVideos.length})`;
+                btn.classList.toggle('active', btn.dataset.tab === activeTab);
+                btn.setAttribute('aria-selected', btn.dataset.tab === activeTab ? 'true' : 'false');
+            });
+        }
 
         function updateImageCount() {
             const images = extractImages();
+            const videos = extractVideos();
             currentImages = images;
-            const count = images.length;
-            floatingBtn.querySelector('.count').textContent = count;
-            imageSubtitle.textContent = `共 ${count} 张图片`;
-            return images;
+            currentVideos = videos;
+            const totalCount = images.length + videos.length;
+            setButtonCount(totalCount);
+            updateTabLabels();
+            return { images, videos };
+        }
+
+        function getMediaList(type = activeTab) {
+            return type === 'image' ? currentImages : currentVideos;
+        }
+
+        function getMediaItem(type, index) {
+            return getMediaList(type)[index] || null;
+        }
+
+        function clearAllSelections() {
+            mediaContainer.querySelectorAll('.media-select').forEach(input => {
+                input.checked = false;
+            });
+        }
+
+        function setCurrentTabSelection(checked) {
+            mediaContainer.querySelectorAll(`.media-select[data-type="${activeTab}"]`).forEach(input => {
+                input.checked = checked;
+            });
+        }
+
+        function getSelectedCurrentMediaItems() {
+            return Array.from(mediaContainer.querySelectorAll(`.media-select[data-type="${activeTab}"]:checked`))
+                .map(input => {
+                    const index = parseInt(input.dataset.index, 10);
+                    const data = getMediaItem(activeTab, index);
+                    return data ? { type: activeTab, index, data } : null;
+                })
+                .filter(Boolean);
+        }
+
+        function updateBatchButton() {
+            batchDownloadBtn.textContent = batchDownloading ? '取消下载' : '批量下载';
+            batchDownloadBtn.classList.toggle('danger', batchDownloading);
+        }
+
+        function cancelBatchDownload() {
+            if (!batchDownloading) return;
+            batchCancelRequested = true;
+            if (currentDownloadTask) {
+                currentDownloadTask.abort();
+            }
+        }
+
+        async function runBatchDownload() {
+            if (batchDownloading) {
+                cancelBatchDownload();
+                return;
+            }
+
+            const selectedItems = getSelectedCurrentMediaItems();
+            if (selectedItems.length === 0) {
+                alert('请先选择要下载的素材');
+                return;
+            }
+
+            batchDownloading = true;
+            batchCancelRequested = false;
+            updateBatchButton();
+
+            for (const item of selectedItems) {
+                if (batchCancelRequested) break;
+
+                const filename = getDownloadFilename(item.type, item.index, item.data.url);
+                currentDownloadTask = createDownloadTask(item.data.url, filename);
+
+                try {
+                    await currentDownloadTask.promise;
+                } catch (error) {
+                    if (batchCancelRequested || error?.message === '下载已取消') {
+                        break;
+                    }
+                    console.error('[无印豆包] 批量下载单项失败:', error);
+                } finally {
+                    currentDownloadTask = null;
+                }
+            }
+
+            batchDownloading = false;
+            batchCancelRequested = false;
+            updateBatchButton();
+        }
+
+        function renderEmptyState(type) {
+            const isImage = type === 'image';
+            mediaContainer.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">${isImage ? '🖼️' : '🎬'}</div>
+                    <div class="empty-state-text">当前页面没有找到${isImage ? '图片' : '视频'}</div>
+                    <div class="empty-state-desc">可以切换到另一个标签查看已提取的素材</div>
+                </div>
+            `;
+        }
+
+        function renderMedia(type = activeTab) {
+            const mediaItems = type === 'image'
+                ? currentImages.map((image, index) => ({ type: 'image', data: image, index }))
+                : currentVideos.map((video, index) => ({ type: 'video', data: video, index }));
+
+            if (mediaItems.length === 0) {
+                renderEmptyState(type);
+                return;
+            }
+
+            mediaContainer.innerHTML = mediaItems.map((item) => {
+                if (item.type === 'image') {
+                    const image = item.data;
+                    const resolution = (image.width && image.height) ? `${image.width} × ${image.height}` : '';
+                    return `
+                        <div class="media-card">
+                            <div class="media-preview" data-type="image" data-index="${item.index}">
+                                <img src="${image.url}" alt="图片 ${item.index + 1}" loading="lazy">
+                                ${resolution ? `<div class="image-info">${resolution}</div>` : ''}
+                            </div>
+                            <div class="video-meta">
+                                ${resolution ? `<span class="video-meta-item">${resolution}</span>` : ''}
+                            </div>
+                            <div class="video-actions">
+                                <button class="action-btn btn-media-download" data-type="image" data-index="${item.index}">下载</button>
+                                <button class="action-btn btn-media-copy" data-type="image" data-index="${item.index}">复制</button>
+                                <input class="media-select" type="checkbox" data-type="image" data-index="${item.index}" aria-label="选择图片 ${item.index + 1}">
+                            </div>
+                        </div>
+                    `;
+                }
+
+                const video = item.data;
+                const resolution = (video.width && video.height) ? `${video.width} × ${video.height}` : '';
+                const duration = formatDuration(video.duration);
+                const posterAttr = video.poster_url ? ` poster="${video.poster_url}"` : '';
+                return `
+                    <div class="media-card">
+                        <div class="media-preview">
+                            <video src="${video.url}" preload="none" playsinline${posterAttr}></video>
+                            <div class="video-click-zone video-click-top" data-index="${item.index}" aria-label="选择视频 ${item.index + 1}"></div>
+                            <div class="video-click-zone video-click-bottom" data-index="${item.index}" aria-label="播放或暂停视频 ${item.index + 1}">
+                                <div class="video-control-overlay">
+                                    <span class="video-play-indicator">▶</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="video-meta">
+                            ${resolution ? `<span class="video-meta-item">${resolution}</span>` : ''}
+                            ${duration ? `<span class="video-meta-item">⏱ ${duration}</span>` : ''}
+                        </div>
+                        <div class="video-actions">
+                            <button class="action-btn btn-media-download" data-type="video" data-index="${item.index}">下载</button>
+                            <button class="action-btn btn-media-copy" data-type="video" data-index="${item.index}">地址</button>
+                            <input class="media-select" type="checkbox" data-type="video" data-index="${item.index}" aria-label="选择视频 ${item.index + 1}">
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            mediaContainer.querySelectorAll('.btn-media-download').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const type = btn.dataset.type;
+                    const index = parseInt(btn.dataset.index, 10);
+                    const media = getMediaItem(type, index);
+                    if (!media) return;
+
+                    btn.textContent = '下载中';
+                    const filename = getDownloadFilename(type, index, media.url);
+                    const success = await downloadImage(media.url, filename);
+                    if (!success) {
+                        btn.textContent = '下载';
+                        return;
+                    }
+
+                    btn.classList.add('success');
+                    btn.textContent = '✓ 已下载';
+                    setTimeout(() => {
+                        btn.classList.remove('success');
+                        btn.textContent = '下载';
+                    }, 2000);
+                });
+            });
+
+            mediaContainer.querySelectorAll('.btn-media-copy').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const type = btn.dataset.type;
+                    const index = parseInt(btn.dataset.index, 10);
+                    const media = getMediaItem(type, index);
+                    if (!media) return;
+
+                    const defaultText = type === 'image' ? '复制' : '地址';
+                    btn.textContent = '复制中';
+                    try {
+                        if (type === 'image') {
+                            await copyImageToClipboard(media.url);
+                        } else {
+                            await navigator.clipboard.writeText(media.url);
+                        }
+                        btn.classList.add('success');
+                        btn.textContent = '✓ 已复制';
+                        setTimeout(() => {
+                            btn.classList.remove('success');
+                            btn.textContent = defaultText;
+                        }, 2000);
+                    } catch (err) {
+                        console.error('复制失败:', err);
+                        btn.textContent = defaultText;
+                        alert(type === 'image' ? '复制图片失败，请重试' : '复制地址失败，请重试');
+                    }
+                });
+            });
+
+            mediaContainer.querySelectorAll('.media-card').forEach(card => {
+                const checkbox = card.querySelector('.media-select');
+                if (!checkbox) return;
+
+                card.querySelector('.video-click-top')?.addEventListener('click', () => {
+                    checkbox.checked = !checkbox.checked;
+                });
+            });
+
+            mediaContainer.querySelectorAll('.media-preview img').forEach(img => {
+                img.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const preview = img.closest('.media-preview');
+                    const index = parseInt(preview?.dataset.index || '', 10);
+                    const image = getMediaItem('image', index);
+                    showImagePreview(image);
+                });
+            });
+
+            mediaContainer.querySelectorAll('.video-click-bottom').forEach(zone => {
+                zone.addEventListener('click', () => {
+                    const preview = zone.closest('.media-preview');
+                    const video = preview?.querySelector('video');
+                    const indicator = zone.querySelector('.video-play-indicator');
+                    if (!video || !indicator) return;
+
+                    if (video.paused) {
+                        video.play().then(() => {
+                            indicator.textContent = 'Ⅱ';
+                        }).catch(err => {
+                            console.error('视频播放失败:', err);
+                        });
+                    } else {
+                        video.pause();
+                        indicator.textContent = '▶';
+                    }
+                });
+            });
+
+            mediaContainer.querySelectorAll('.media-preview video').forEach(video => {
+                video.addEventListener('pause', () => {
+                    const indicator = video.closest('.media-preview')?.querySelector('.video-play-indicator');
+                    if (indicator) indicator.textContent = '▶';
+                });
+                video.addEventListener('play', () => {
+                    const indicator = video.closest('.media-preview')?.querySelector('.video-play-indicator');
+                    if (indicator) indicator.textContent = 'Ⅱ';
+                });
+                video.addEventListener('ended', () => {
+                    const indicator = video.closest('.media-preview')?.querySelector('.video-play-indicator');
+                    if (indicator) indicator.textContent = '▶';
+                });
+            });
         }
 
         floatingBtn.addEventListener('click', () => {
-            const images = updateImageCount();
-            
-            if (images.length === 0) {
-                imageContainer.innerHTML = `
+            const { images, videos } = updateImageCount();
+            activeTab = images.length === 0 && videos.length > 0 ? 'video' : 'image';
+            updateTabLabels();
+
+            if (images.length === 0 && videos.length === 0) {
+                mediaContainer.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">🖼️</div>
-                        <div class="empty-state-text">当前页面没有找到图片</div>
+                        <div class="empty-state-text">当前页面没有找到图片或视频</div>
                     </div>
                 `;
             } else {
-                imageContainer.innerHTML = images.map((image, index) => `
-                    <div class="image-item">
-                        <img src="${image.url}" alt="图片 ${index + 1}" loading="lazy">
-                        <div class="image-info">${image.width} × ${image.height}</div>
-                        <div class="image-actions">
-                            <button class="action-btn btn-download" data-url="${image.url}" data-index="${index}">下载</button>
-                            <button class="action-btn btn-copy" data-url="${image.url}" data-index="${index}">复制地址</button>
-                        </div>
-                    </div>
-                `).join('');
-
-                imageContainer.querySelectorAll('.btn-download').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        const url = btn.dataset.url;
-                        const index = btn.dataset.index;
-                        downloadImage(url, `doubao_image_${parseInt(index) + 1}.png`);
-                        btn.classList.add('success');
-                        btn.textContent = '✓ 已下载';
-                        setTimeout(() => {
-                            btn.classList.remove('success');
-                            btn.textContent = '下载';
-                        }, 2000);
-                    });
-                });
-                
-                imageContainer.querySelectorAll('.btn-copy').forEach(btn => {
-                    btn.addEventListener('click', async (e) => {
-                        e.stopPropagation();
-                        const url = btn.dataset.url;
-                        try {
-                            await navigator.clipboard.writeText(url);
-                            btn.classList.add('success');
-                            btn.textContent = '✓ 已复制';
-                            setTimeout(() => {
-                                btn.classList.remove('success');
-                                btn.textContent = '复制地址';
-                            }, 2000);
-                        } catch (err) {
-                            console.error('复制失败:', err);
-                        }
-                    });
-                });
+                renderMedia(activeTab);
             }
 
             modal.classList.add('show');
         });
 
+        tabButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                clearAllSelections();
+                activeTab = btn.dataset.tab;
+                updateTabLabels();
+                renderMedia(activeTab);
+            });
+        });
+
+        selectAllBtn.addEventListener('click', () => {
+            setCurrentTabSelection(true);
+        });
+
+        clearSelectionBtn.addEventListener('click', () => {
+            setCurrentTabSelection(false);
+        });
+
+        batchDownloadBtn.addEventListener('click', runBatchDownload);
+
         closeBtn.addEventListener('click', () => {
             modal.classList.remove('show');
+            closeImagePreview();
         });
 
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
                 modal.classList.remove('show');
+                closeImagePreview();
             }
         });
 
         updateImageCount();
     }
 
+    let initRetryCount = 0;
+    const MAX_RETRY = 10;
+
     function initScript() {
         console.log('[无印豆包] 脚本已加载');
-        
-        if (window.location.pathname.includes('/chat/')) {
+
+        if (pageWindow.location.pathname.includes('/chat/')) {
             createFloatingButton();
             return;
         }
-        
-        const hasScriptData = !!document.querySelector('script[data-script-src="modern-run-router-data-fn"]');
+
+        const hasScriptData = !!document.querySelector(
+            'script[data-script-src="modern-run-router-data-fn"], script[data-script-src="modern-run-window-fn"]'
+        );
         const hasRouterData = !!window._ROUTER_DATA;
+
         if (!hasScriptData && !hasRouterData) {
-            console.warn('[无印豆包] 页面数据仍未加载，等待中...');
-            setTimeout(initScript, 1000);
-            return;
+            initRetryCount++;
+            if (initRetryCount < MAX_RETRY) {
+                console.warn(`[无印豆包] 页面数据仍未加载，等待中... (${initRetryCount}/${MAX_RETRY})`);
+                setTimeout(initScript, 500);
+                return;
+            } else {
+                console.warn('[无印豆包] 页面数据加载超时，仍创建按钮（可能无法提取历史图片）');
+            }
         }
-        
+
+        if (isDoubaoSharePage()) {
+            chatImages = extractSharePageImages();
+            loadSharePageVideos();
+        }
+
         createFloatingButton();
     }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initScript);
+    } else if (document.readyState === 'interactive') {
+        if (document.body) {
+            initScript();
+        } else {
+            document.addEventListener('DOMContentLoaded', initScript);
+        }
     } else {
         initScript();
     }
