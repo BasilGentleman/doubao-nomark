@@ -3,15 +3,21 @@
   <h1>无印豆包</h1>
 </div>
 <p align="center">
-  <a href="https://github.com/ihmily/doubao-nomark/stargazers"><img src="https://img.shields.io/github/stars/ihmily/doubao-nomark" alt="GitHub stars"/></a>
+  <a href="https://github.com/ihmily/doubao-nomark/stargazers"><img src="https://img.shields.io/github/stars/ihmily/doubao-nomark?v=0" alt="GitHub stars"/></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python"/></a>
-  <a href="https://hub.docker.com/r/ihmily/doubao-nomark/tags"><img src="https://img.shields.io/docker/pulls/ihmily/doubao-nomark" alt="Docker Pulls"/></a>
+  <a href="https://hub.docker.com/r/ihmily/doubao-nomark/tags"><img src="https://img.shields.io/docker/pulls/ihmily/doubao-nomark?v=0" alt="Docker Pulls"/></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"/></a>
 </p>
 
+
 <p align="center">从豆包对话链接中提取无水印图片和视频资源的 API 服务/浏览器插件</p>
 
+## 更新日志
 
+- **v1.0.8**：新增支持豆包国际版 www.dola.com 解析、新增 Chrome 插件
+- **v1.0.7**：修复视频提取、优化插件UI
+- **v1.0.5**：修复豆包无水印视频提取、浏览器插件新增支持视频无水印提取
+- **v1.0.4**：API和插件新增支持千问（Qianwen.com）聊天页图片提取功能
 
 ## 快速开始
 
@@ -101,7 +107,7 @@ from doubao_parser.image import doubao_image_parse
 # 异步调用
 result = await doubao_image_parse(
     url="https://www.doubao.com/thread/xxxxxx",
-    return_raw=False  # False: 返回简化格式, True: 返回原始数据
+    return_raw=False,  # False: 返回简化格式, True: 返回原始数据
 )
 ```
 
@@ -111,10 +117,7 @@ result = await doubao_image_parse(
 from doubao_parser.video import doubao_video_parse
 
 # 异步调用
-video_data = await doubao_video_parse(
-    url="https://www.doubao.com/video-sharing?share_id=xxx&video_id=xxx",
-    return_raw=False
-)
+video_data = await doubao_video_parse(url="https://www.doubao.com/thread/xxxxxx", return_raw=False)
 ```
 
 具体代码参考doubao_parser目录下代码。
@@ -129,11 +132,11 @@ video_data = await doubao_video_parse(
 
 ### 获取分享链接方法
 
-| ![copy-image-link.jpg](docs/images/copy-image-link.jpg) | ![copy-video-link.jpg](docs/images/copy-video-link.jpg) |
-| :-----------------------------------------------------: | :-----------------------------------------------------: |
-|                    获取图片分享链接                     |                    获取视频分享链接                     |
+| ![copy-image-link.jpg](docs/images/copy-image-link.jpg) | ![copy-video-link.jpg](docs/images/copy-video-link-new.jpg) |
+| :-----------------------------------------------------: | :---------------------------------------------------------: |
+|                    获取图片分享链接                     |                      获取视频分享链接                       |
 
-**注意，获取视频分享链接的方式跟图片的相比略有不同。** 获取视频分享地址需要直接长按在视频上，然后点击分享，如果是iphone手机可以直接点击拷贝，即可成功复制到地址。安卓手机可以通过选择在浏览器打开或者分享到微信打开，然后再复制其地址。
+**目前获取视频分享链接的方式与图片已经一致。** 长按对话选中对应图片或者视频，然后点击分享复制链接地址。
 
 ### 访问 API 文档
 
@@ -174,12 +177,12 @@ video_data = await doubao_video_parse(
 
 ```json
 {
-  "url": "https://www.doubao.com/video-sharing?share_id=xxx&video_id=xxx",
+  "url": "https://www.doubao.com/thread/xxxxxx",
   "return_raw": false
 }
 ```
 
-**GET** `/parse-video?url=https://www.doubao.com/video-sharing?share_id=xxx&video_id=xxx`
+**GET** `/parse-video?url=https://www.doubao.com/thread/xxxxxx`
 
 **响应示例：**
 
@@ -212,21 +215,34 @@ video_data = await doubao_video_parse(
 
 **在线安装：**
 
-1. 访问Edge扩展安装页面：[无印豆包 - 图片提取](https://microsoftedge.microsoft.com/addons/detail/%E6%97%A0%E5%8D%B0%E8%B1%86%E5%8C%85-%E5%9B%BE%E7%89%87%E6%8F%90%E5%8F%96/hjlplfcnpgglfdjafekcgahffdengaij)
+1. 访问Edge扩展安装页面：[无印豆包 - 素材提取](https://microsoftedge.microsoft.com/addons/detail/hjlplfcnpgglfdjafekcgahffdengaij)
 2. 点击「获取」按钮即可完成安装
 
 **使用说明：**
 
-- 在豆包聊天界面会在页面右下角显示📷按钮，点击按钮可以打开图片下载面板
-- 在豆包对话页面会自动识别并提取无水印的图片资源 **（插件不支持视频）**
+- 在豆包聊天界面会在页面右下角显示📷按钮或者顶部栏显示📥︎按钮，点击按钮可以打开素材下载面板
+- 在豆包对话页面会自动识别并提取无水印的图片和视频资源
+- 如果安装后没有出现📷按钮，请退出或者刷新浏览器界面，重新打开豆包聊天界面。
+
+### Chrome 扩展
+
+项目同时提供标准 Chromium Manifest V3 扩展，目录位于 `extension/chrome`。Chrome 本地安装步骤：
+
+1. 在地址栏打开 `chrome://extensions/` 并开启“开发者模式”。
+2. 点击“加载已解压的扩展程序”，选择 `extension/chrome` 目录。
+3. 打开或刷新豆包、Dola、千问聊天页面，使用右下角的素材入口。
 
 ### 插件演示
 
 ![script-example](docs/images/script-example.jpg)
 
+![script-example2](docs/images/script-example2.png)
+
+![script-example2](docs/images/script-example3.jpg)
+
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ihmily/doubao-nomark&type=date&legend=top-left)](https://www.star-history.com/#ihmily/doubao-nomark&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=ihmily/doubao-nomark&type=date&legend=top-left)](https://star-history.dera.page/#ihmily/doubao-nomark&type=date&legend=top-left)
 
 ## 许可证
 
