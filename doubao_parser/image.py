@@ -60,7 +60,7 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
 
                         for creation in creations:
                             if not (isinstance(creation, dict) and creation.get("image")):
-                                    continue
+                                continue
                             image_raw = creation["image"]["image_ori_raw"]
                             image_raw["url"] = image_raw["url"].replace("&amp;", "&")
                             image_list.append(image_raw)
