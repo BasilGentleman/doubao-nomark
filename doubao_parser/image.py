@@ -58,8 +58,10 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
                             continue
                         creations = json_data2["creation_block"]["creations"]
 
-                        for image in creations:
-                            image_raw = image["image"]["image_ori_raw"]
+                        for creation in creations:
+                            if not (isinstance(creation, dict) and creation.get("image")):
+                                    continue
+                            image_raw = creation["image"]["image_ori_raw"]
                             image_raw["url"] = image_raw["url"].replace("&amp;", "&")
                             image_list.append(image_raw)
 
@@ -76,8 +78,10 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
 
                         if json_data2.get("creation_block"):
                             creations = json_data2["creation_block"]["creations"]
-                            for image in creations:
-                                image_raw = image["image"]["image_ori_raw"]
+                            for creation in creations:
+                                if not (isinstance(creation, dict) and creation.get("image")):
+                                    continue
+                                image_raw = creation["image"]["image_ori_raw"]
                                 image_raw["url"] = image_raw["url"].replace("&amp;", "&")
                                 image_list.append(image_raw)
 
