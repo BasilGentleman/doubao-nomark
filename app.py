@@ -29,7 +29,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET","POST"],
     allow_headers=["*"],
 )
 
@@ -96,7 +96,7 @@ async def parse_doubao(request: DouBaoRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Exception: {e}")
-        raise HTTPException(status_code=500, detail="图片解析失败，请检查链接是否正确")
+        raise HTTPException(status_code=500, detail="图片解析失败，请检查链接是否正确并重试")
 
 
 @app.get("/parse", summary="解析豆包|千问对话图片(GET)")

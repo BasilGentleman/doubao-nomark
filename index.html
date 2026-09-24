@@ -8,8 +8,9 @@
     <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png">
     <link rel="icon" type="image/png" sizes="48x48" href="icons/icon48.png">
     <link rel="icon" type="image/png" sizes="128x128" href="icons/icon128.png">
-    <script src="https://unpkg.com/vue@3.5.25/dist/vue.global.prod.js"></script>
-    <script src="https://unpkg.com/axios@1.12.0/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/vue@3.5.25/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/axios@1.12.0/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -123,7 +124,8 @@
 
         .input-with-clear {
             position: relative;
-            flex: 1;
+            flex: 1 1 auto;
+            min-width: 0;
         }
 
         .input-with-clear .input-field {
@@ -177,6 +179,10 @@
             transition: all 0.2s;
         }
 
+        .input-group > .btn {
+            flex: 0 0 auto;
+        }
+
         .btn-primary {
             background: #1f1f1f;
             color: #ffffff;
@@ -190,6 +196,32 @@
             background: #e0e0e0;
             color: #a0a0a0;
             cursor: not-allowed;
+        }
+
+        .batch-download-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+            white-space: nowrap;
+            background: #1f1f1f;
+            color: #ffffff;
+        }
+
+        .batch-download-btn:hover:not(:disabled) {
+            background: #3a3a3a;
+        }
+
+        .batch-download-btn:disabled {
+            background: #e0e0e0;
+            color: #a0a0a0;
+            cursor: wait;
+        }
+
+        .batch-download-btn svg {
+            width: 16px;
+            height: 16px;
+            flex: 0 0 auto;
         }
 
         .loading {
@@ -700,9 +732,21 @@
                     <button
                         class="btn btn-primary"
                         @click="parseUrl"
-                        :disabled="loading || !url"
+                        :disabled="loading || batchDownloading || !url"
                     >
                         {{ loading ? '解析中...' : '解析' }}
+                    </button>
+                    <button
+                        v-if="(currentTab === 'image' && images.length > 1) || (currentTab === 'video' && videos.length > 1)"
+                        class="btn batch-download-btn"
+                        type="button"
+                        @click="currentTab === 'image' ? downloadImagesZip() : downloadVideosZip()"
+                        :disabled="batchDownloading"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
+                        </svg>
+                        <span>{{ batchDownloading ? `打包中 ${batchDownloadProgress}/${batchDownloadTotal}` : (batchDownloadStatus || '全部') }}</span>
                     </button>
                 </div>
             </div>
@@ -820,6 +864,11 @@
                     copiedIndex: null,
                     videoDownloadingIndex: null,
                     videoCopiedIndex: null,
+                    batchDownloading: false,
+                    batchDownloadProgress: 0,
+                    batchDownloadTotal: 0,
+                    batchDownloadStatus: '',
+                    batchFilePrefix: '',
                     apiBaseUrl: window.location.origin,
                     urlRegex: /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/g
                 }
@@ -868,6 +917,8 @@
                     this.copiedIndex = null;
                     this.videoDownloadingIndex = null;
                     this.videoCopiedIndex = null;
+                    this.batchDownloadStatus = '';
+                    this.batchFilePrefix = '';
                 },
                 async parseUrl() {
                     if (!this.url.trim()) {
@@ -890,6 +941,8 @@
                     this.copiedIndex = null;
                     this.videoDownloadingIndex = null;
                     this.videoCopiedIndex = null;
+                    this.batchDownloadStatus = '';
+                    this.batchFilePrefix = '';
 
                     try {
                         if (this.currentTab === 'image') {
@@ -899,6 +952,7 @@
 
                             if (response.data.success) {
                                 this.images = response.data.images;
+                                this.batchFilePrefix = this.createBatchFilePrefix(extractedUrl);
                             } else {
                                 this.showError('解析失败，请检查链接是否正确');
                             }
@@ -909,6 +963,7 @@
 
                             if (response.data.success) {
                                 this.videos = response.data.videos;
+                                this.batchFilePrefix = this.createBatchFilePrefix(extractedUrl);
                             } else {
                                 this.showError('解析失败，请检查链接是否正确');
                             }
@@ -936,7 +991,7 @@
                         const blob = await response.blob();
                         const link = document.createElement('a');
                         link.href = URL.createObjectURL(blob);
-                        link.download = `doubao_image_${index + 1}.jpg`;
+                        link.download = this.getImageFilename(index);
                         link.click();
                         URL.revokeObjectURL(link.href);
                         
@@ -947,6 +1002,146 @@
                         this.downloadingIndex = null;
                         this.showError(`图片 ${index + 1} 下载失败`);
                     }
+                },
+                createBatchFilePrefix(url) {
+                    const pad = value => String(value).padStart(2, '0');
+                    const now = new Date();
+                    let platformCode = 'D';
+
+                    try {
+                        const hostname = new URL(url, window.location.href).hostname.toLowerCase();
+                        platformCode = hostname.includes('qianwen.com') ? 'Q' : 'D';
+                    } catch (error) {
+                        // Keep Doubao as the default platform when the source URL is unavailable.
+                    }
+
+                    const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+                    const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                    return `${date}${platformCode}_${time}`;
+                },
+                getImageFilename(index) {
+                    const filePrefix = this.batchFilePrefix || this.createBatchFilePrefix(this.url);
+                    return `image_${filePrefix}_${String(index + 1).padStart(2, '0')}.png`;
+                },
+                getFileExtension(url, mimeType, type) {
+                    const mimeExtensions = {
+                        'image/jpeg': 'jpg',
+                        'image/png': 'png',
+                        'image/webp': 'webp',
+                        'image/gif': 'gif',
+                        'image/avif': 'avif',
+                        'video/mp4': 'mp4',
+                        'video/webm': 'webm',
+                        'video/quicktime': 'mov'
+                    };
+                    const normalizedMimeType = (mimeType || '').split(';', 1)[0].trim().toLowerCase();
+                    if (mimeExtensions[normalizedMimeType]) {
+                        return mimeExtensions[normalizedMimeType];
+                    }
+
+                    try {
+                        const pathname = new URL(url, window.location.href).pathname;
+                        const match = pathname.match(/\.([a-z0-9]{1,5})$/i);
+                        if (match) {
+                            return match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+                        }
+                    } catch (error) {
+                        // Use the media type fallback when a resource URL cannot be parsed.
+                    }
+
+                    return type === 'video' ? 'mp4' : 'jpg';
+                },
+                triggerDownload(blob, filename) {
+                    const link = document.createElement('a');
+                    const objectUrl = URL.createObjectURL(blob);
+                    link.href = objectUrl;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+                },
+                async downloadBatch(items, type) {
+                    if (!items.length) {
+                        return;
+                    }
+                    if (!window.JSZip) {
+                        this.showError('批量下载组件加载失败，请刷新页面后重试');
+                        return;
+                    }
+
+                    this.batchDownloading = true;
+                    this.batchDownloadProgress = 0;
+                    this.batchDownloadTotal = items.length;
+                    this.batchDownloadStatus = '';
+                    this.error = '';
+
+                    const zip = new window.JSZip();
+                    const failedIndexes = [];
+                    let successCount = 0;
+
+                    try {
+                        for (let index = 0; index < items.length; index += 1) {
+                            const item = items[index];
+                            const resourceUrl = typeof item === 'string' ? item : item.url;
+
+                            try {
+                                if (!resourceUrl) {
+                                    throw new Error('empty resource URL');
+                                }
+                                const response = await fetch(resourceUrl);
+                                if (!response.ok) {
+                                    throw new Error(`HTTP ${response.status}`);
+                                }
+                                const blob = await response.blob();
+                                const extension = this.getFileExtension(resourceUrl, blob.type, type);
+                                const filename = type === 'image'
+                                    ? this.getImageFilename(index)
+                                    : `doubao_video_${String(index + 1).padStart(3, '0')}.${extension}`;
+                                zip.file(filename, blob);
+                                successCount += 1;
+                            } catch (error) {
+                                failedIndexes.push(index + 1);
+                                console.warn(`Batch download failed for item ${index + 1}`, error);
+                            } finally {
+                                this.batchDownloadProgress = index + 1;
+                            }
+                        }
+
+                        if (!successCount) {
+                            throw new Error('No resources were downloaded');
+                        }
+
+                        const archive = await zip.generateAsync({
+                            type: 'blob',
+                            compression: 'DEFLATE',
+                            compressionOptions: { level: 6 }
+                        });
+                        const prefix = type === 'video' ? 'doubao_videos' : 'doubao_images';
+                        const date = new Date().toISOString().slice(0, 10);
+                        this.triggerDownload(archive, `${prefix}_${date}.zip`);
+                        this.batchDownloadStatus = '✓ 已打包';
+
+                        if (failedIndexes.length) {
+                            this.showError(`ZIP 已下载，但有 ${failedIndexes.length} 个资源失败`);
+                        }
+                        setTimeout(() => {
+                            this.batchDownloadStatus = '';
+                        }, 2500);
+                    } catch (error) {
+                        console.error(error);
+                        this.showError('批量下载失败，请检查资源链接后重试');
+                    } finally {
+                        this.batchDownloading = false;
+                        this.batchDownloadProgress = 0;
+                        this.batchDownloadTotal = 0;
+                    }
+                },
+                downloadImagesZip() {
+                    return this.downloadBatch(this.images, 'image');
+                },
+                downloadVideosZip() {
+                    return this.downloadBatch(this.videos, 'video');
                 },
                 async copyUrl(url, index) {
                     const success = await this.copyToClipboard(url);

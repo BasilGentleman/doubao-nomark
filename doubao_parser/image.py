@@ -67,6 +67,8 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
 
             elif isinstance(data, list) and data:
                 router_data_fn = json.loads(data[0]["routerDataFnArgs"][0])
+                if not isinstance(router_data_fn, dict):
+                    raise ValueError("router_data_fn 解析失败，请重试")
                 message_snapshot = router_data_fn["data"]["message_snapshot"]["message_list"]
                 for message in message_snapshot:
                     if not message.get("content_block"):
