@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         无印豆包 - 素材提取
 // @namespace    http://tampermonkey.net/
-// @version      1.0.17
+// @version      1.0.16
 // @description  在豆包/Dola/千问对话页面提取无水印图片/视频，支持一键下载
 // @description:en Extract watermark-free images/videos from Doubao, Dola, and Qianwen with one-click download
 // @author       无印豆包
@@ -1038,12 +1038,6 @@
                 }
             };
 
-            const parseContentBlock = (block) => {
-                const contentData = block.content_v2 || block.content;
-                if (!contentData) return null;
-                return typeof contentData === 'string' ? JSON.parse(contentData) : contentData;
-            };
-
             const parseMessageSnapshot = (messageSnapshot) => {
                 if (!Array.isArray(messageSnapshot)) return;
 
@@ -1052,9 +1046,7 @@
                 for (const message of messageSnapshot) {
                     for (const block of message.content_block || []) {
                         try {
-                            const contentData = parseContentBlock(block);
-                            const creations = contentData?.creation_block?.creations;
-                            if (!Array.isArray(creations)) continue;
+                            const creations = getDoubaoBlockCreations(block);
 
                             for (const creation of creations) {
                                 addCreationMedia(creation);
