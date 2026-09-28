@@ -4,6 +4,28 @@ import re
 import httpx
 
 
+def _extract_creations(content):
+    """Return creations from either the legacy or Doubao Work content shape."""
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(content, dict):
+        return []
+
+    creations = []
+    creation_block = content.get("creation_block")
+    if isinstance(creation_block, dict) and isinstance(creation_block.get("creations"), list):
+        creations.extend(creation_block["creations"])
+
+    rich_media = content.get("rich_media_layout_block")
+    media = rich_media.get("media") if isinstance(rich_media, dict) else None
+    if isinstance(media, list):
+        creations.extend(item["creation"] for item in media if isinstance(item, dict) and item.get("creation"))
+    return creations
+
+
 async def doubao_image_parse(url: str, return_raw: bool = False):
     if "doubao.com/thread/" not in url and "dola.com/thread/" not in url:
         raise ValueError("链接格式不正确，请使用豆包对话链接（包含 /thread/）")
@@ -49,14 +71,8 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
                         continue
 
                     for m2 in message["content_block"]:
-                        if m2.get("content_v2"):
-                            json_data2 = json.loads(m2["content_v2"])
-                        else:
-                            json_data2 = json.loads(m2["content"]) if isinstance(m2["content"], str) else m2["content"]
-
-                        if not json_data2.get("creation_block"):
-                            continue
-                        creations = json_data2["creation_block"]["creations"]
+                        json_data2 = m2.get("content_v2") or m2.get("content")
+                        creations = _extract_creations(json_data2)
 
                         for creation in creations:
                             if not (isinstance(creation, dict) and creation.get("image")):
@@ -76,16 +92,13 @@ async def doubao_image_parse(url: str, return_raw: bool = False):
 
                     for m2 in message["content_block"]:
                         json_data2 = m2.get("content_v2") or m2.get("content")
-                        json_data2 = json.loads(json_data2) if isinstance(json_data2, str) else json_data2
-
-                        if json_data2.get("creation_block"):
-                            creations = json_data2["creation_block"]["creations"]
-                            for creation in creations:
-                                if not (isinstance(creation, dict) and creation.get("image")):
-                                    continue
-                                image_raw = creation["image"]["image_ori_raw"]
-                                image_raw["url"] = image_raw["url"].replace("&amp;", "&")
-                                image_list.append(image_raw)
+                        creations = _extract_creations(json_data2)
+                        for creation in creations:
+                            if not (isinstance(creation, dict) and creation.get("image")):
+                                continue
+                            image_raw = creation["image"]["image_ori_raw"]
+                            image_raw["url"] = image_raw["url"].replace("&amp;", "&")
+                            image_list.append(image_raw)
 
     except KeyError as e:
         print(f"Exception: {e}")
@@ -149,5 +162,6 @@ if __name__ == "__main__":
 
     print(asyncio.run(doubao_image_parse("https://www.doubao.com/thread/aef4c7a4c78c2")))
     # print(asyncio.run(doubao_image_parse("https://www.dola.com/thread/xGgiLJgxJFb6UpWwf")))
+    # print(asyncio.run(doubao_image_parse("https://www.doubao.com/thread/xN7jPitXZdJwTkf5f")))
     # print(asyncio.run(doubao_image_parse("https://www.doubao.com/thread/xba6cbc09655f8f7fbeceb0ee9f8f3f44")))
     # print(asyncio.run(qianwen_image_parse("https://www.qianwen.com/share/chat/1b7641042a7c4f2fae8111f732c31f7f")))

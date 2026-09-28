@@ -632,15 +632,33 @@
     }
 
     
+    function getCreationsFromContent(content) {
+        if (!content || typeof content !== 'object') return [];
+
+        const creations = [];
+        if (Array.isArray(content.creation_block?.creations)) {
+            creations.push(...content.creation_block.creations);
+        }
+
+        const media = content.rich_media_layout_block?.media;
+        if (Array.isArray(media)) {
+            for (const item of media) {
+                if (item?.creation) creations.push(item.creation);
+            }
+        }
+        return creations;
+    }
+
     function findCreationsInPatch(patchOps) {
         if (!Array.isArray(patchOps)) return [];
 
-        let creations = [];
+        const creations = [];
         for (const op of patchOps) {
             const blocks = op?.patch_value?.content_block;
             if (!Array.isArray(blocks)) continue;
-            const block = blocks.find(item => Array.isArray(item?.content?.creation_block?.creations));
-            if (block) creations = block.content.creation_block.creations;
+            for (const block of blocks) {
+                creations.push(...getCreationsFromContent(block?.content));
+            }
         }
         if (creations.length > 0) return creations;
 
@@ -650,13 +668,12 @@
             const content = JSON.parse(extPatch.patch_value.ext.creation_full_content);
             if (!Array.isArray(content)) return [];
             for (const item of content) {
-                const creations = item?.BlockInfo?.BlockContent?.content?.creation_block?.creations;
-                if (Array.isArray(creations)) return creations;
+                creations.push(...getCreationsFromContent(item?.BlockInfo?.BlockContent?.content));
             }
         } catch (error) {
             console.warn('Failed to parse creation_full_content:', error);
         }
-        return [];
+        return creations;
     }
 
     function findCreationsInEventData(rawEventData) {
@@ -801,9 +818,8 @@
             for (const item of messages) {
                 try {
                     for (const content of item.content_block) {
-                        const creationBlock = content.content?.creation_block;
-                        if (!creationBlock || !Array.isArray(creationBlock.creations)) continue;
-                        for (const creation of creationBlock.creations) {
+                        const creations = getCreationsFromContent(content?.content);
+                        for (const creation of creations) {
                             if (creation?.video) {
                                 const vid = creation.video.vid;
                                 requestDoubaoVideoInfo(vid, creation.video.fallback_api).then(info => addChatVideo(info));
@@ -856,8 +872,8 @@
         }
         if (typeof value !== 'object') return;
 
-        const creations = value.creation_block?.creations;
-        if (Array.isArray(creations)) {
+        const creations = getCreationsFromContent(value);
+        if (creations.length > 0) {
             for (const creation of creations) {
                 if (creation?.video) {
                     startFallbackVideo(creation.video.fallback_api, '分享页');
