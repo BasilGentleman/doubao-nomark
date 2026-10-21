@@ -125,7 +125,7 @@
     }
 
     function getDoubaoBlockCreations(block) {
-        const content = block?.content_v2 || block?.content;
+        const content = block?.content_v2 || block?.content || block;
         const data = typeof content === 'string' ? parseJsonString(content) : content;
         const creations = data?.creation_block?.creations || [];
         const media = data?.rich_media_layout_block?.media || [];
@@ -549,11 +549,26 @@
             const rawArgs = script.getAttribute('data-fn-args');
             if (!rawArgs) continue;
             try {
-                const data = JSON.parse(rawArgs.replace(/&quot;/g, '"'));
+                const data = JSON.parse(decodeHtmlJson(rawArgs));
                 for (const api of findDoubaoFallbackApis(data, rawArgs)) apis.add(api);
             } catch (_) { /* Ignore unrelated route data. */ }
         }
+        if (root === document && pageWindow._ROUTER_DATA) {
+            for (const api of findDoubaoFallbackApis(pageWindow._ROUTER_DATA)) apis.add(api);
+        }
         return [...apis];
+    }
+
+    function decodeHtmlJson(value) {
+        let text = String(value || '');
+        for (let index = 0; index < 3; index++) {
+            const decoded = text
+                .replace(/&amp;|&#38;/g, '&')
+                .replace(/&quot;|&#34;/g, '"');
+            if (decoded === text) break;
+            text = decoded;
+        }
+        return text;
     }
 
     async function loadSharePageVideos() {
@@ -1003,7 +1018,7 @@
         }
     }
 
-    function extractSharePageImages() {
+    function extractSharePageImagesLegacy() {
         try {
             const imageList = [];
 
@@ -1100,6 +1115,63 @@
             console.error('[无印豆包] 提取图片失败:', error);
             return [];
         }
+    }
+
+    // Share pages have changed shape several times. Walk every route payload
+    // recursively so both normal creations and Work rich-media creations are found.
+    function collectSharePageMedia(value, imageList, depth = 0, seen = new Set()) {
+        if (depth > 40 || value == null) return;
+
+        if (typeof value === 'string') {
+            const text = decodeHtmlJson(value).trim();
+            if (text.startsWith('{') || text.startsWith('[')) {
+                try {
+                    collectSharePageMedia(JSON.parse(text), imageList, depth + 1, seen);
+                } catch (_) { /* Ignore ordinary text fields. */ }
+            }
+            return;
+        }
+
+        if (typeof value !== 'object' || seen.has(value)) return;
+        seen.add(value);
+
+        for (const creation of getDoubaoBlockCreations(value)) {
+            if (creation?.video) {
+                handleDoubaoCreationVideo(creation);
+                continue;
+            }
+
+            const image = getCreationImageInfo(creation);
+            const url = normalizeImageUrl(image?.url);
+            if (!url || imageList.some(item => item.url === url)) continue;
+            imageList.push({ url, width: image.width || 0, height: image.height || 0 });
+            console.log('[无印豆包] 找到图片:', url, `${image.width || 0} × ${image.height || 0}`);
+        }
+
+        for (const item of Object.values(value)) {
+            collectSharePageMedia(item, imageList, depth + 1, seen);
+        }
+    }
+
+    function extractSharePageImages(root = document) {
+        const imageList = [];
+        const scripts = root.querySelectorAll(
+            'script[data-script-src="modern-run-router-data-fn"], script[data-script-src="modern-run-window-fn"]'
+        );
+        for (const script of scripts) {
+            const rawArgs = script.getAttribute('data-fn-args');
+            if (!rawArgs) continue;
+            try {
+                const data = JSON.parse(decodeHtmlJson(rawArgs));
+                processDoubaoFallbackVideos(data, rawArgs);
+                collectSharePageMedia(data, imageList);
+            } catch (_) { /* Ignore unrelated route data. */ }
+        }
+        if (root === document && pageWindow._ROUTER_DATA) {
+            collectSharePageMedia(pageWindow._ROUTER_DATA, imageList);
+        }
+        console.log('[无印豆包] 分享页提取完成，共找到', imageList.length, '张图片');
+        return imageList;
     }
 
     function extractImages() {
