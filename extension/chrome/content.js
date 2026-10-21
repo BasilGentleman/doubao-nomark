@@ -6,7 +6,8 @@
         QIANWEN_SHARE_INFO: 'qianwen.com/api/v1/share/info',
         QIANWEN_SNAP: 'qianwen.com/api/v1/chat/snap',
         DOUBAO_COMPLETION: '/chat/completion',
-        DOUBAO_CHAIN: '/im/chain/single'
+        DOUBAO_CHAIN: '/im/chain/single',
+        DOUBAO_CANVAS_DOC_GET: '/creativity/canvas_workspace/doc/get'
     });
     const DOUBAO_HOSTS = Object.freeze(new Set(['www.doubao.com', 'www.dola.com']));
     const PLATFORM_CODE = window.location.hostname.includes('qianwen.com') ? 'Q' : 'D';
@@ -398,6 +399,30 @@
         };
     }
 
+    function parseCanvasDocumentImages(data) {
+        const items = data?.data?.snapshot?.doc?.items;
+        if (!items || typeof items !== 'object' || Array.isArray(items)) return;
+
+        resetMediaForScopeChange();
+        let mediaChanged = false;
+        for (const [itemId, item] of Object.entries(items)) {
+            const imageInfo = item?.asset?.image_info;
+            const rawValue = imageInfo?.image_ori_raw;
+            const rawImages = Array.isArray(rawValue) ? rawValue : [rawValue];
+            for (const rawImage of rawImages) {
+                const image = normalizeImageData(
+                    rawImage,
+                    false,
+                    imageInfo?.key || item?.asset?.asset_key || itemId
+                );
+                if (!addUniqueImage(image)) continue;
+                mediaChanged = true;
+                console.log('[无印豆包][画布] 获取到原始图片:', image.url, `${image.width} × ${image.height}`);
+            }
+        }
+        if (mediaChanged) updateButtonCount();
+    }
+
     console.log('%c[无印豆包] 脚本开始执行', 'color: #667eea; font-size: 14px; font-weight: bold');
     console.log('[无印豆包] 当前 URL:', window.location.href);
 
@@ -486,6 +511,18 @@
     XMLHttpRequest.prototype.send = function(...args) {
         const url = this[xhrRequestUrl];
         this.addEventListener('load', function() {
+            if (hasUrl(url, URL_PATTERNS.DOUBAO_CANVAS_DOC_GET)) {
+                try {
+                    const data = this.responseType === 'json' && this.response
+                        ? this.response
+                        : JSON.parse(this.responseText);
+                    parseCanvasDocumentImages(data);
+                } catch (error) {
+                    console.warn('[无印豆包][画布] XHR 响应解析失败:', error);
+                }
+                return;
+            }
+
             if (hasUrl(url, URL_PATTERNS.DOUBAO_CHAIN)) {
                 try {
                     const data = JSON.parse(this.responseText);
@@ -510,6 +547,12 @@
     const originalFetch = window.fetch;
     window.fetch = async function(...args) {
         const url = getRequestUrl(args[0]);
+
+        if (hasUrl(url, URL_PATTERNS.DOUBAO_CANVAS_DOC_GET)) {
+            const response = await originalFetch.apply(this, args);
+            observeJson(response, parseCanvasDocumentImages).catch(() => {});
+            return response;
+        }
         
         if (hasUrl(url, URL_PATTERNS.QIANWEN_SESSION_LIST)) {
             console.log('[无印豆包] 检测到千问 session msg list 请求:', url);
@@ -913,7 +956,10 @@
 
     function extractImages() {
         resetMediaForScopeChange();
-        if (isDoubaoHost() && window.location.pathname.includes('/chat/')) {
+        if (isDoubaoHost() && (
+            window.location.pathname.includes('/chat/')
+            || window.location.pathname.includes('/creativity/canvas_workspace')
+        )) {
             console.log('[无印豆包] 豆包聊天界面，返回已缓存的', chatImages.length, '张图片');
             return chatImages;
         } else if (window.location.hostname.includes('qianwen.com') && window.location.pathname.includes('/chat/')) {

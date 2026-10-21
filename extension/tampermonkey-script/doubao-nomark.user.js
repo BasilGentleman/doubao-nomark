@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         无印豆包 - 素材提取
 // @namespace    http://tampermonkey.net/
-// @version      1.0.17
+// @version      1.0.18
 // @description  在豆包/Dola/千问对话页面提取无水印图片/视频，支持一键下载
 // @description:en Extract watermark-free images/videos from Doubao, Dola, and Qianwen with one-click download
 // @author       无印豆包
@@ -12,6 +12,7 @@
 // @match        https://www.doubao.com/thread/*
 // @match        https://www.doubao.com/share/*
 // @match        https://www.doubao.com/chat/*
+// @match        https://www.doubao.com/creativity/canvas_workspace*
 // @match        https://www.dola.com/thread/*
 // @match        https://www.dola.com/share/*
 // @match        https://www.dola.com/chat/*
@@ -109,6 +110,20 @@
         return true;
     }
 
+    function parseCanvasDocumentImages(data) {
+        const items = data?.data?.snapshot?.doc?.items;
+        if (!items || typeof items !== 'object' || Array.isArray(items)) return;
+
+        for (const item of Object.values(items)) {
+            const rawValue = item?.asset?.image_info?.image_ori_raw;
+            const rawImages = Array.isArray(rawValue) ? rawValue : [rawValue];
+            for (const rawImage of rawImages) {
+                if (!rawImage) continue;
+                addChatImage(rawImage, '[无印豆包][画布] 获取到原始图片');
+            }
+        }
+    }
+
     function getCreationImageInfo(creation) {
         const imageData = creation?.image?.image_ori_raw;
         if (typeof imageData === 'string') {
@@ -155,6 +170,18 @@
     pageWindow.XMLHttpRequest.prototype.send = function(...args) {
         const url = this._url;
         this.addEventListener('load', function() {
+            if (url && url.includes('/creativity/canvas_workspace/doc/get')) {
+                try {
+                    const data = this.responseType === 'json' && this.response
+                        ? this.response
+                        : JSON.parse(this.responseText);
+                    parseCanvasDocumentImages(data);
+                } catch (error) {
+                    console.warn('[无印豆包][画布] XHR 响应解析失败:', error);
+                }
+                return;
+            }
+
             if (url && (url.includes('/im/chain/single'))) {
                 try {
                     const data = JSON.parse(this.responseText);
@@ -186,6 +213,12 @@
     pageWindow.fetch = async function(...args) {
         const url = args[0];
         const requestUrl = typeof url === 'string' ? url : (url?.url || '');
+
+        if (requestUrl && requestUrl.includes('/creativity/canvas_workspace/doc/get')) {
+            const response = await originalFetch.apply(this, args);
+            response.clone().json().then(parseCanvasDocumentImages).catch(() => {});
+            return response;
+        }
 
         if (requestUrl && requestUrl.includes('/im/chain/single')) {
             const response = await originalFetch.apply(this, args);
@@ -1176,7 +1209,10 @@
 
     function extractImages() {
 
-        if (isDoubaoHost() && pageWindow.location.pathname.includes('/chat/')) {
+        if (isDoubaoHost() && (
+            pageWindow.location.pathname.includes('/chat/')
+            || pageWindow.location.pathname.includes('/creativity/canvas_workspace')
+        )) {
             console.log('[无印豆包] 豆包聊天界面，返回已缓存的', chatImages.length, '张图片');
             return chatImages;
         } else if (pageWindow.location.hostname.includes('qianwen.com') && pageWindow.location.pathname.includes('/chat/')) {
@@ -2638,8 +2674,11 @@
     function initScript() {
         console.log('[无印豆包] 脚本已加载');
 
-        if (pageWindow.location.pathname.includes('/chat/')) {
-            if (isDoubaoHost()) parseChatRouterImages();
+        if (pageWindow.location.pathname.includes('/chat/')
+            || pageWindow.location.pathname.includes('/creativity/canvas_workspace')) {
+            if (isDoubaoHost() && pageWindow.location.pathname.includes('/chat/')) {
+                parseChatRouterImages();
+            }
             createFloatingButton();
             return;
         }
