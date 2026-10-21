@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         无印豆包 - 素材提取
 // @namespace    http://tampermonkey.net/
-// @version      1.0.16
+// @version      1.0.17
 // @description  在豆包/Dola/千问对话页面提取无水印图片/视频，支持一键下载
 // @description:en Extract watermark-free images/videos from Doubao, Dola, and Qianwen with one-click download
 // @author       无印豆包
@@ -1211,6 +1211,163 @@
         }
     }
 
+    function getBatchFilePrefix() {
+        const pad = value => String(value).padStart(2, '0');
+        const now = new Date();
+        const platformCode = pageWindow.location.hostname.includes('qianwen.com') ? 'Q' : 'D';
+        const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+        const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        return `${date}${platformCode}_${time}`;
+    }
+
+    function getBatchFileExtension(url, mimeType, type) {
+        const mimeExtensions = {
+            'image/jpeg': 'jpg',
+            'image/png': 'png',
+            'image/webp': 'webp',
+            'image/gif': 'gif',
+            'image/avif': 'avif',
+            'video/mp4': 'mp4',
+            'video/webm': 'webm',
+            'video/quicktime': 'mov'
+        };
+        const normalizedMimeType = (mimeType || '').split(';', 1)[0].trim().toLowerCase();
+        if (mimeExtensions[normalizedMimeType]) return mimeExtensions[normalizedMimeType];
+
+        try {
+            const pathname = new URL(url, pageWindow.location.href).pathname;
+            const match = pathname.match(/\.([a-z0-9]{1,5})$/i);
+            if (match) return match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+        } catch (_) {
+            // Use the media type fallback when a resource URL cannot be parsed.
+        }
+        return type === 'video' ? 'mp4' : 'png';
+    }
+
+    function triggerBlobDownload(blob, filename) {
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    }
+
+    async function downloadBatchAsZip(items, type, options = {}) {
+        const files = [];
+        const failedIndexes = [];
+        const filePrefix = getBatchFilePrefix();
+        let successCount = 0;
+
+        for (let index = 0; index < items.length; index += 1) {
+            if (options.isCancelled?.()) {
+                return { cancelled: true, successCount, failedIndexes };
+            }
+
+            const item = items[index];
+            const media = item?.data || item;
+            const resourceUrl = media?.url;
+            const itemIndex = Number.isInteger(item?.index) ? item.index : index;
+
+            try {
+                if (!resourceUrl) throw new Error('empty resource URL');
+                const blob = await fetchImageBlob(resourceUrl);
+                // Read the response bytes before writing them to the ZIP archive.
+                const data = await blob.arrayBuffer();
+                const extension = getBatchFileExtension(resourceUrl, blob.type, type);
+                const filename = `${type}_${filePrefix}_${String(itemIndex + 1).padStart(2, '0')}.${extension}`;
+                files.push({ filename, data: new Uint8Array(data) });
+                successCount += 1;
+            } catch (error) {
+                failedIndexes.push(itemIndex + 1);
+                console.warn('[无印豆包] ZIP 中单项下载失败:', itemIndex + 1, error);
+            } finally {
+                options.onProgress?.(index + 1, items.length);
+            }
+        }
+
+        if (options.isCancelled?.()) {
+            return { cancelled: true, successCount, failedIndexes };
+        }
+        if (!successCount) throw new Error('没有可加入 ZIP 的素材');
+
+        console.log('[无印豆包] 开始生成 ZIP，文件数:', successCount);
+        options.onZipProgress?.(0);
+        const archiveData = buildStoredZip(files, options.onZipProgress);
+        options.onZipProgress?.(100);
+        const BlobConstructor = pageWindow.Blob || Blob;
+        const archive = new BlobConstructor([archiveData], { type: 'application/zip' });
+        console.log('[无印豆包] ZIP 生成完成，大小:', archive.size);
+        const date = new Date().toISOString().slice(0, 10);
+        triggerBlobDownload(archive, `doubao_${type}s_${date}.zip`);
+        return { cancelled: false, successCount, failedIndexes };
+    }
+
+    function buildStoredZip(files, onProgress) {
+        const encoder = new TextEncoder();
+        const parts = [];
+        const central = [];
+        let offset = 0;
+        let centralSize = 0;
+        const crcTable = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1;
+            crcTable[n] = c >>> 0;
+        }
+        for (let i = 0; i < files.length; i++) {
+            const { data } = files[i];
+            const name = encoder.encode(files[i].filename);
+            if (name.length > 65535 || data.length > 0xffffffff || offset > 0xffffffff) {
+                throw new Error('素材过大，无法生成标准 ZIP');
+            }
+            let crc = 0xffffffff;
+            for (const byte of data) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 255];
+            crc = (crc ^ 0xffffffff) >>> 0;
+            const local = new Uint8Array(30 + name.length);
+            const l = new DataView(local.buffer);
+            l.setUint32(0, 0x04034b50, true);
+            l.setUint16(4, 20, true);
+            l.setUint16(6, 0x0800, true); // UTF-8 names
+            l.setUint32(14, crc, true);
+            l.setUint32(18, data.length, true);
+            l.setUint32(22, data.length, true);
+            l.setUint16(26, name.length, true);
+            local.set(name, 30);
+            parts.push(local, data);
+
+            const directory = new Uint8Array(46 + name.length);
+            const d = new DataView(directory.buffer);
+            d.setUint32(0, 0x02014b50, true);
+            d.setUint16(4, 20, true);
+            d.setUint16(6, 20, true);
+            d.setUint16(8, 0x0800, true);
+            d.setUint32(16, crc, true);
+            d.setUint32(20, data.length, true);
+            d.setUint32(24, data.length, true);
+            d.setUint16(28, name.length, true);
+            d.setUint32(42, offset, true);
+            directory.set(name, 46);
+            central.push(directory);
+            offset += local.length + data.length;
+            centralSize += directory.length;
+            onProgress?.((i + 1) / files.length * 90);
+        }
+        if (files.length > 65535 || offset + centralSize > 0xffffffff) {
+            throw new Error('素材总量过大，无法生成标准 ZIP');
+        }
+        const end = new Uint8Array(22);
+        const e = new DataView(end.buffer);
+        e.setUint32(0, 0x06054b50, true);
+        e.setUint16(8, files.length, true);
+        e.setUint16(10, files.length, true);
+        e.setUint32(12, centralSize, true);
+        e.setUint32(16, offset, true);
+        return new Blob([...parts, ...central, end], { type: 'application/zip' });
+    }
+
     function getMediaExtension(url, type) {
         try {
             const pathname = new URL(url, pageWindow.location.href).pathname;
@@ -1238,6 +1395,7 @@
                 method: 'GET',
                 url,
                 responseType: 'blob',
+                timeout: 30000,
                 onload: (response) => {
                     if (response.status >= 200 && response.status < 300 && response.response) {
                         resolve(response.response);
@@ -1252,8 +1410,10 @@
     }
 
     async function fetchImageBlob(url) {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timeoutId = controller ? setTimeout(() => controller.abort(), 30000) : null;
         try {
-            const response = await fetch(url);
+            const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
             if (!response.ok) {
                 throw new Error(`图片请求失败: ${response.status}`);
             }
@@ -1261,6 +1421,8 @@
         } catch (error) {
             console.warn('[无印豆包] fetch 读取图片失败，尝试 GM_xmlhttpRequest:', error);
             return fetchImageBlobWithGM(url);
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
         }
     }
 
@@ -2011,7 +2173,6 @@
         let activeTab = 'image';
         let batchDownloading = false;
         let batchCancelRequested = false;
-        let currentDownloadTask = null;
         let imagePreviewOverlay = null;
 
         function closeImagePreview() {
@@ -2100,16 +2261,15 @@
         }
 
         function updateBatchButton() {
-            batchDownloadBtn.textContent = batchDownloading ? '取消下载' : '批量下载';
+            batchDownloadBtn.textContent = batchDownloading
+                ? `取消打包 ${batchDownloadBtn.dataset.progress || '0/0'}`
+                : '批量下载';
             batchDownloadBtn.classList.toggle('danger', batchDownloading);
         }
 
         function cancelBatchDownload() {
             if (!batchDownloading) return;
             batchCancelRequested = true;
-            if (currentDownloadTask) {
-                currentDownloadTask.abort();
-            }
         }
 
         async function runBatchDownload() {
@@ -2126,29 +2286,44 @@
 
             batchDownloading = true;
             batchCancelRequested = false;
+            batchDownloadBtn.dataset.progress = `0/${selectedItems.length}`;
             updateBatchButton();
+            let zipDownloaded = false;
 
-            for (const item of selectedItems) {
-                if (batchCancelRequested) break;
-
-                const filename = getDownloadFilename(item.type, item.index, item.data.url);
-                currentDownloadTask = createDownloadTask(item.data.url, filename);
-
-                try {
-                    await currentDownloadTask.promise;
-                } catch (error) {
-                    if (batchCancelRequested || error?.message === '下载已取消') {
-                        break;
+            try {
+                const result = await downloadBatchAsZip(selectedItems, activeTab, {
+                    isCancelled: () => batchCancelRequested,
+                    onProgress: (completed, total) => {
+                        batchDownloadBtn.dataset.progress = `${completed}/${total}`;
+                        updateBatchButton();
+                    },
+                    onZipProgress: percent => {
+                        batchDownloadBtn.dataset.progress = `生成 ZIP ${Math.round(percent)}%`;
+                        updateBatchButton();
                     }
-                    console.error('[无印豆包] 批量下载单项失败:', error);
-                } finally {
-                    currentDownloadTask = null;
-                }
-            }
+                });
 
-            batchDownloading = false;
-            batchCancelRequested = false;
-            updateBatchButton();
+                if (result.cancelled) {
+                    return;
+                }
+                if (result.failedIndexes.length) {
+                    alert(`ZIP 已下载，但有 ${result.failedIndexes.length} 个素材失败`);
+                }
+                batchDownloadBtn.textContent = '✓ 已打包';
+                zipDownloaded = true;
+                setTimeout(() => {
+                    if (!batchDownloading) batchDownloadBtn.textContent = '批量下载';
+                }, 2500);
+            } catch (error) {
+                console.error('[无印豆包] 批量打包失败:', error);
+                alert(error?.message || '批量下载失败，请重试');
+            } finally {
+                batchDownloading = false;
+                batchCancelRequested = false;
+                delete batchDownloadBtn.dataset.progress;
+                if (!zipDownloaded) updateBatchButton();
+                batchDownloadBtn.classList.toggle('danger', batchDownloading);
+            }
         }
 
         function renderEmptyState(type) {
