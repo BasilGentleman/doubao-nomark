@@ -8,8 +8,9 @@
     <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png">
     <link rel="icon" type="image/png" sizes="48x48" href="icons/icon48.png">
     <link rel="icon" type="image/png" sizes="128x128" href="icons/icon128.png">
-    <script src="https://unpkg.com/vue@3.5.25/dist/vue.global.prod.js"></script>
-    <script src="https://unpkg.com/axios@1.12.0/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/vue@3.5.25/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/axios@1.12.0/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdmirror.com/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -121,6 +122,44 @@
             transition: border-color 0.2s;
         }
 
+        .input-with-clear {
+            position: relative;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        .input-with-clear .input-field {
+            width: 100%;
+            padding-right: 36px;
+        }
+
+        .clear-btn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 20px;
+            height: 20px;
+            border: none;
+            background: #d0d0d0;
+            color: #ffffff;
+            border-radius: 50%;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            background: #a0a0a0;
+        }
+
+        .clear-btn.hidden {
+            display: none;
+        }
+
         .input-field:focus {
             outline: none;
             border-color: #1f1f1f;
@@ -140,6 +179,10 @@
             transition: all 0.2s;
         }
 
+        .input-group > .btn {
+            flex: 0 0 auto;
+        }
+
         .btn-primary {
             background: #1f1f1f;
             color: #ffffff;
@@ -153,6 +196,32 @@
             background: #e0e0e0;
             color: #a0a0a0;
             cursor: not-allowed;
+        }
+
+        .batch-download-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+            white-space: nowrap;
+            background: #1f1f1f;
+            color: #ffffff;
+        }
+
+        .batch-download-btn:hover:not(:disabled) {
+            background: #3a3a3a;
+        }
+
+        .batch-download-btn:disabled {
+            background: #e0e0e0;
+            color: #a0a0a0;
+            cursor: wait;
+        }
+
+        .batch-download-btn svg {
+            width: 16px;
+            height: 16px;
+            flex: 0 0 auto;
         }
 
         .loading {
@@ -234,11 +303,26 @@
             overflow: hidden;
             border: 1px solid #e0e0e0;
             background: #000000;
+            transition: border-color 0.2s;
+        }
+
+        .video-card:hover {
+            border-color: #1f1f1f;
+        }
+
+        .videos-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+            gap: 16px;
+            margin-top: 32px;
         }
 
         .video-card video {
             width: 100%;
             height: auto;
+            max-height: 480px;
+            object-fit: contain;
+            background: #000000;
             display: block;
         }
 
@@ -401,6 +485,11 @@
 
             .images-grid {
                 grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                gap: 12px;
+            }
+
+            .videos-grid {
+                grid-template-columns: 1fr;
                 gap: 12px;
             }
 
@@ -591,11 +680,11 @@
                 <div v-if="currentTab === 'image' && images.length > 0" class="image-count">
                     已提取 <span>{{ images.length }}</span> 张图片
                 </div>
-                <div v-if="currentTab === 'video' && video" class="image-count">
-                    已提取 <span>1</span> 个视频
+                <div v-if="currentTab === 'video' && videos.length > 0" class="image-count">
+                    已提取 <span>{{ videos.length }}</span> 个视频
                 </div>
             </div>
-            <p>一键提取豆包对话中的高清图片和视频，无水印、无压缩</p>
+            <p>一键提取豆包/千问对话中的高清图片和视频，无水印、无压缩</p>
         </div>
 
         <div class="main-card">
@@ -622,19 +711,42 @@
                 </div>
 
                 <div class="input-group">
-                    <input 
-                        v-model="url" 
-                        type="text" 
-                        class="input-field" 
-                        :placeholder="currentTab === 'image' ? '输入豆包对话链接，例如：https://www.doubao.com/thread/xxxxx' : '输入豆包视频分享链接，例如：https://www.doubao.com/video-sharing?share_id=xxx&video_id=xxx'"
-                        @keyup.enter="parseUrl"
-                    >
-                    <button 
-                        class="btn btn-primary" 
+                    <div class="input-with-clear">
+                        <input
+                            v-model="url"
+                            type="text"
+                            class="input-field"
+                            :placeholder="currentTab === 'image' ? '输入包含图片的豆包/千问对话分享链接，例如：https://www.doubao.com/thread/xxxxx' : '输入包含视频的豆包或云雀对话分享链接，例如：https://www.doubao.com/thread/xxxxx'"
+                            @keyup.enter="parseUrl"
+                            @input="toggleClearBtn"
+                        >
+                        <button
+                            class="clear-btn"
+                            :class="{ hidden: !url }"
+                            @click="clearInput"
+                            type="button"
+                        >
+                            ×
+                        </button>
+                    </div>
+                    <button
+                        class="btn btn-primary"
                         @click="parseUrl"
-                        :disabled="loading || !url"
+                        :disabled="loading || batchDownloading || !url"
                     >
                         {{ loading ? '解析中...' : '解析' }}
+                    </button>
+                    <button
+                        v-if="(currentTab === 'image' && images.length > 1) || (currentTab === 'video' && videos.length > 1)"
+                        class="btn batch-download-btn"
+                        type="button"
+                        @click="currentTab === 'image' ? downloadImagesZip() : downloadVideosZip()"
+                        :disabled="batchDownloading"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
+                        </svg>
+                        <span>{{ batchDownloading ? `打包中 ${batchDownloadProgress}/${batchDownloadTotal}` : (batchDownloadStatus || '全部') }}</span>
                     </button>
                 </div>
             </div>
@@ -669,30 +781,32 @@
                 </div>
             </div>
 
-            <div v-if="currentTab === 'video' && video">
-                <div class="video-card">
-                    <video :src="video.url" :poster="video.poster_url" controls></video>
-                    <div class="video-info">
-                        {{ video.width }} × {{ video.height }} | {{ video.definition }}
-                    </div>
-                    <div class="video-actions">
-                        <button class="action-btn" @click="viewVideo(video.url)">
-                            查看
-                        </button>
-                        <button 
-                            class="action-btn" 
-                            :class="{ success: videoDownloading }"
-                            @click="downloadVideo()"
-                        >
-                            {{ videoDownloading ? '✓ 已下载' : '下载' }}
-                        </button>
-                        <button 
-                            class="action-btn" 
-                            :class="{ success: videoCopied }"
-                            @click="copyVideoUrl()"
-                        >
-                            {{ videoCopied ? '✓ 已复制' : '复制原始地址' }}
-                        </button>
+            <div v-if="currentTab === 'video' && videos.length > 0">
+                <div :class="videos.length > 1 ? 'videos-grid' : ''">
+                    <div v-for="(video, index) in videos" :key="index" class="video-card">
+                        <video :src="video.url" :poster="video.poster_url" controls></video>
+                        <div class="video-info">
+                            {{ video.width }} × {{ video.height }} | {{ video.definition }}
+                        </div>
+                        <div class="video-actions">
+                            <button class="action-btn" @click="viewVideo(video.url)">
+                                查看
+                            </button>
+                            <button 
+                                class="action-btn" 
+                                :class="{ success: videoDownloadingIndex === index }"
+                                @click="downloadVideo(video.url, index)"
+                            >
+                                {{ videoDownloadingIndex === index ? '✓ 已下载' : '下载' }}
+                            </button>
+                            <button 
+                                class="action-btn" 
+                                :class="{ success: videoCopiedIndex === index }"
+                                @click="copyVideoUrl(video.url, index)"
+                            >
+                                {{ videoCopiedIndex === index ? '✓ 已复制' : '复制' }}
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -710,7 +824,7 @@
                 <p>输入链接并点击解析来提取图片</p>
             </div>
 
-            <div v-if="!loading && currentTab === 'video' && !video" class="empty-state">
+            <div v-if="!loading && currentTab === 'video' && videos.length === 0" class="empty-state">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -743,18 +857,29 @@
                     currentTab: 'image', // 'image' or 'video'
                     url: '',
                     images: [],
-                    video: null,  // {url, width, height, definition, poster_url}
+                    videos: [],  // [{url, width, height, definition, duration, codec_type, poster_url}]
                     loading: false,
                     error: '',
                     downloadingIndex: null,
                     copiedIndex: null,
-                    videoDownloading: false,
-                    videoCopied: false,
-                    apiBaseUrl: window.location.origin
+                    videoDownloadingIndex: null,
+                    videoCopiedIndex: null,
+                    batchDownloading: false,
+                    batchDownloadProgress: 0,
+                    batchDownloadTotal: 0,
+                    batchDownloadStatus: '',
+                    batchFilePrefix: '',
+                    apiBaseUrl: window.location.origin,
+                    urlRegex: /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/g
                 }
             },
 
             methods: {
+                extractUrl(text) {
+                    if (!text) return null;
+                    const matches = text.match(this.urlRegex);
+                    return matches ? matches[0] : null;
+                },
                 async copyToClipboard(text) {
                     try {
                         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -784,48 +909,61 @@
                     this.url = '';
                     this.error = '';
                     if (tab === 'image') {
-                        this.video = null;
+                        this.videos = [];
                     } else if (tab === 'video') {
                         this.images = [];
                     }
                     this.downloadingIndex = null;
                     this.copiedIndex = null;
-                    this.videoDownloading = false;
-                    this.videoCopied = false;
+                    this.videoDownloadingIndex = null;
+                    this.videoCopiedIndex = null;
+                    this.batchDownloadStatus = '';
+                    this.batchFilePrefix = '';
                 },
                 async parseUrl() {
                     if (!this.url.trim()) {
-                        this.showError('请输入豆包对话链接');
+                        this.showError('请输入包含链接的文本');
+                        return;
+                    }
+
+                    const extractedUrl = this.extractUrl(this.url);
+                    
+                    if (!extractedUrl) {
+                        this.showError('未在输入内容中找到有效的网址');
                         return;
                     }
 
                     this.loading = true;
                     this.error = '';
                     this.images = [];
-                    this.video = null;
+                    this.videos = [];
                     this.downloadingIndex = null;
                     this.copiedIndex = null;
-                    this.videoDownloading = false;
-                    this.videoCopied = false;
+                    this.videoDownloadingIndex = null;
+                    this.videoCopiedIndex = null;
+                    this.batchDownloadStatus = '';
+                    this.batchFilePrefix = '';
 
                     try {
                         if (this.currentTab === 'image') {
-                            const response = await axios.get(`${this.apiBaseUrl}/parse`, {
-                                params: { url: this.url }
+                            const response = await axios.post(`${this.apiBaseUrl}/parse`, {
+                                url: extractedUrl
                             });
 
                             if (response.data.success) {
                                 this.images = response.data.images;
+                                this.batchFilePrefix = this.createBatchFilePrefix(extractedUrl);
                             } else {
                                 this.showError('解析失败，请检查链接是否正确');
                             }
                         } else {
-                            const response = await axios.get(`${this.apiBaseUrl}/parse-video`, {
-                                params: { url: this.url }
+                            const response = await axios.post(`${this.apiBaseUrl}/parse-video`, {
+                                url: extractedUrl
                             });
 
                             if (response.data.success) {
-                                this.video = response.data.video;
+                                this.videos = response.data.videos;
+                                this.batchFilePrefix = this.createBatchFilePrefix(extractedUrl);
                             } else {
                                 this.showError('解析失败，请检查链接是否正确');
                             }
@@ -853,7 +991,7 @@
                         const blob = await response.blob();
                         const link = document.createElement('a');
                         link.href = URL.createObjectURL(blob);
-                        link.download = `doubao_image_${index + 1}.jpg`;
+                        link.download = this.getImageFilename(index);
                         link.click();
                         URL.revokeObjectURL(link.href);
                         
@@ -864,6 +1002,146 @@
                         this.downloadingIndex = null;
                         this.showError(`图片 ${index + 1} 下载失败`);
                     }
+                },
+                createBatchFilePrefix(url) {
+                    const pad = value => String(value).padStart(2, '0');
+                    const now = new Date();
+                    let platformCode = 'D';
+
+                    try {
+                        const hostname = new URL(url, window.location.href).hostname.toLowerCase();
+                        platformCode = hostname.includes('qianwen.com') ? 'Q' : 'D';
+                    } catch (error) {
+                        // Keep Doubao as the default platform when the source URL is unavailable.
+                    }
+
+                    const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+                    const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                    return `${date}${platformCode}_${time}`;
+                },
+                getImageFilename(index) {
+                    const filePrefix = this.batchFilePrefix || this.createBatchFilePrefix(this.url);
+                    return `image_${filePrefix}_${String(index + 1).padStart(2, '0')}.png`;
+                },
+                getFileExtension(url, mimeType, type) {
+                    const mimeExtensions = {
+                        'image/jpeg': 'jpg',
+                        'image/png': 'png',
+                        'image/webp': 'webp',
+                        'image/gif': 'gif',
+                        'image/avif': 'avif',
+                        'video/mp4': 'mp4',
+                        'video/webm': 'webm',
+                        'video/quicktime': 'mov'
+                    };
+                    const normalizedMimeType = (mimeType || '').split(';', 1)[0].trim().toLowerCase();
+                    if (mimeExtensions[normalizedMimeType]) {
+                        return mimeExtensions[normalizedMimeType];
+                    }
+
+                    try {
+                        const pathname = new URL(url, window.location.href).pathname;
+                        const match = pathname.match(/\.([a-z0-9]{1,5})$/i);
+                        if (match) {
+                            return match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+                        }
+                    } catch (error) {
+                        // Use the media type fallback when a resource URL cannot be parsed.
+                    }
+
+                    return type === 'video' ? 'mp4' : 'jpg';
+                },
+                triggerDownload(blob, filename) {
+                    const link = document.createElement('a');
+                    const objectUrl = URL.createObjectURL(blob);
+                    link.href = objectUrl;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+                },
+                async downloadBatch(items, type) {
+                    if (!items.length) {
+                        return;
+                    }
+                    if (!window.JSZip) {
+                        this.showError('批量下载组件加载失败，请刷新页面后重试');
+                        return;
+                    }
+
+                    this.batchDownloading = true;
+                    this.batchDownloadProgress = 0;
+                    this.batchDownloadTotal = items.length;
+                    this.batchDownloadStatus = '';
+                    this.error = '';
+
+                    const zip = new window.JSZip();
+                    const failedIndexes = [];
+                    let successCount = 0;
+
+                    try {
+                        for (let index = 0; index < items.length; index += 1) {
+                            const item = items[index];
+                            const resourceUrl = typeof item === 'string' ? item : item.url;
+
+                            try {
+                                if (!resourceUrl) {
+                                    throw new Error('empty resource URL');
+                                }
+                                const response = await fetch(resourceUrl);
+                                if (!response.ok) {
+                                    throw new Error(`HTTP ${response.status}`);
+                                }
+                                const blob = await response.blob();
+                                const extension = this.getFileExtension(resourceUrl, blob.type, type);
+                                const filename = type === 'image'
+                                    ? this.getImageFilename(index)
+                                    : `doubao_video_${String(index + 1).padStart(3, '0')}.${extension}`;
+                                zip.file(filename, blob);
+                                successCount += 1;
+                            } catch (error) {
+                                failedIndexes.push(index + 1);
+                                console.warn(`Batch download failed for item ${index + 1}`, error);
+                            } finally {
+                                this.batchDownloadProgress = index + 1;
+                            }
+                        }
+
+                        if (!successCount) {
+                            throw new Error('No resources were downloaded');
+                        }
+
+                        const archive = await zip.generateAsync({
+                            type: 'blob',
+                            compression: 'DEFLATE',
+                            compressionOptions: { level: 6 }
+                        });
+                        const prefix = type === 'video' ? 'doubao_videos' : 'doubao_images';
+                        const date = new Date().toISOString().slice(0, 10);
+                        this.triggerDownload(archive, `${prefix}_${date}.zip`);
+                        this.batchDownloadStatus = '✓ 已打包';
+
+                        if (failedIndexes.length) {
+                            this.showError(`ZIP 已下载，但有 ${failedIndexes.length} 个资源失败`);
+                        }
+                        setTimeout(() => {
+                            this.batchDownloadStatus = '';
+                        }, 2500);
+                    } catch (error) {
+                        console.error(error);
+                        this.showError('批量下载失败，请检查资源链接后重试');
+                    } finally {
+                        this.batchDownloading = false;
+                        this.batchDownloadProgress = 0;
+                        this.batchDownloadTotal = 0;
+                    }
+                },
+                downloadImagesZip() {
+                    return this.downloadBatch(this.images, 'image');
+                },
+                downloadVideosZip() {
+                    return this.downloadBatch(this.videos, 'video');
                 },
                 async copyUrl(url, index) {
                     const success = await this.copyToClipboard(url);
@@ -880,52 +1158,54 @@
                 viewVideo(url) {
                     window.open(url, '_blank');
                 },
-                async downloadVideo() {
+                async downloadVideo(url, index) {
                     try {
-                        if (!this.video || !this.video.url) {
+                        if (!url) {
                             this.showError('视频地址不存在');
                             return;
                         }
-                        this.videoDownloading = true;
-                        const response = await fetch(this.video.url);
+                        this.videoDownloadingIndex = index;
+                        const response = await fetch(url);
                         const blob = await response.blob();
                         const link = document.createElement('a');
                         link.href = URL.createObjectURL(blob);
-                        link.download = `doubao_video.mp4`;
+                        link.download = `doubao_video_${index + 1}.mp4`;
                         link.click();
                         URL.revokeObjectURL(link.href);
                         
                         setTimeout(() => {
-                            this.videoDownloading = false;
+                            this.videoDownloadingIndex = null;
                         }, 2000);
                     } catch (error) {
-                        this.videoDownloading = false;
-                        this.showError('视频下载失败');
+                        this.videoDownloadingIndex = null;
+                        this.showError(`视频 ${index + 1} 下载失败`);
                     }
                 },
-                async copyVideoUrl() {
-                    if (!this.video || !this.video.url) {
+                async copyVideoUrl(url, index) {
+                    if (!url) {
                         this.showError('视频地址不存在');
                         return;
                     }
                     
-                    const success = await this.copyToClipboard(this.video.url);
+                    const success = await this.copyToClipboard(url);
                     
                     if (success) {
-                        this.videoCopied = true;
-                        console.log('已复制视频地址:', this.video.url);
+                        this.videoCopiedIndex = index;
                         setTimeout(() => {
-                            this.videoCopied = false;
+                            this.videoCopiedIndex = null;
                         }, 2000);
                     } else {
-                        console.error('复制失败');
                         this.showError('复制失败，请手动复制');
                     }
                 },
                 showError(message) {
                     this.error = message;
                     setTimeout(() => this.error = '', 5000);
-                }
+                },
+                clearInput() {
+                    this.url = '';
+                },
+                toggleClearBtn() {}
             },
             mounted() {
                 const savedUrl = localStorage.getItem('lastUrl');
