@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         无印豆包 - 素材提取
 // @namespace    http://tampermonkey.net/
-// @version      1.0.18
+// @version      1.0.19
 // @description  在豆包/Dola/千问对话页面提取无水印图片/视频，支持一键下载
 // @description:en Extract watermark-free images/videos from Doubao, Dola, and Qianwen with one-click download
 // @author       无印豆包
