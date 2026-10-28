@@ -19,7 +19,9 @@
     const FALLBACK_RESPONSE_EVENT = 'doubao-nomark-fallback-response';
     const DOWNLOAD_REQUEST_EVENT = 'doubao-nomark-download-request';
     const DOWNLOAD_RESPONSE_EVENT = 'doubao-nomark-download-response';
+    const DOWNLOAD_FAILURE_EVENT = 'doubao-nomark-download-failure';
     const FALLBACK_REQUEST_TIMEOUT_MS = 20000;
+    const DOWNLOAD_REQUEST_TIMEOUT_MS = 30000;
     const pendingFallbackRequests = new Map();
     const pendingDownloadRequests = new Map();
     let fallbackRequestSequence = 0;
@@ -93,6 +95,12 @@
         else pending.reject(new Error(detail.error || '后台下载失败'));
     });
 
+    document.addEventListener(DOWNLOAD_FAILURE_EVENT, event => {
+        const error = event.detail?.error || '浏览器未能创建下载任务';
+        console.error('[无印豆包] 后台下载失败:', error);
+        alert(`下载失败：${error}`);
+    });
+
     async function requestFallbackJson(value) {
         const url = buildFallbackApiUrl(value);
         if (!url) throw new Error('fallback_api 地址不受信任');
@@ -122,7 +130,7 @@
             const timeoutId = setTimeout(() => {
                 pendingDownloadRequests.delete(requestId);
                 reject(new Error('后台下载请求超时'));
-            }, FALLBACK_REQUEST_TIMEOUT_MS);
+            }, DOWNLOAD_REQUEST_TIMEOUT_MS);
             pendingDownloadRequests.set(requestId, { resolve, reject, timeoutId });
             document.dispatchEvent(new CustomEvent(DOWNLOAD_REQUEST_EVENT, {
                 detail: { requestId, url, filename }
@@ -430,11 +438,16 @@
     let chatVideos = [];
     let floatingBtnElement = null;
     let panelMediaSync = null;
+    let inlineDownloadObserver = null;
+    let inlineDownloadSyncFrame = 0;
     let mediaScope = getMediaScope();
     const processedFallbackApis = new Set();
     const requestedFallbackApis = new Set();
     const pendingVideoInfo = new Map();
     const fallbackApiByVideoId = new Map();
+    const INLINE_IMAGE_GRID_SELECTOR = '[data-testid="message_image_content"]';
+    const INLINE_DOWNLOAD_HOST_ATTRIBUTE = 'data-doubao-nomark-inline-download';
+    const INLINE_VIDEO_DOWNLOAD_ATTRIBUTE = 'data-doubao-nomark-video-download';
 
     function getMediaScope() {
         return `${window.location.hostname}${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -459,11 +472,442 @@
     }
 
     function updateButtonCount() {
+        scheduleInlineDownloadSync();
         if (!floatingBtnElement) return;
         const countElement = floatingBtnElement.querySelector('.count');
         if (!countElement) return;
         countElement.textContent = chatImages.length + chatVideos.length;
         notifyPanelMediaChanged();
+    }
+
+    function safelyDecodeUrlPart(value) {
+        try {
+            return decodeURIComponent(String(value || ''));
+        } catch (_) {
+            return String(value || '');
+        }
+    }
+
+    function getComparableUrlParts(value) {
+        try {
+            const url = new URL(value, window.location.href);
+            const pathname = safelyDecodeUrlPart(url.pathname).toLowerCase();
+            const basename = (pathname.split('/').pop() || '').replace(/~tplv-.+$/i, '');
+            const tokens = new Set(
+                pathname.match(/[a-z0-9][a-z0-9_-]{11,}/gi) || []
+            );
+            return {
+                identity: getUrlIdentity(url.href).toLowerCase(),
+                pathname,
+                basename,
+                tokens
+            };
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function collectImageBlockUrls(item) {
+        const urls = new Set();
+        item.querySelectorAll('img, source').forEach(element => {
+            for (const value of [element.currentSrc, element.src, element.getAttribute('src')]) {
+                if (isHttpUrl(value)) urls.add(value);
+            }
+            const srcset = element.getAttribute('srcset') || '';
+            srcset.split(',').forEach(candidate => {
+                const value = candidate.trim().split(/\s+/)[0];
+                if (isHttpUrl(value)) urls.add(value);
+            });
+        });
+        return [...urls];
+    }
+
+    function scoreCachedImageForBlock(image, serializedItem, visibleParts) {
+        if (!image?.url) return 0;
+        const imageParts = getComparableUrlParts(image.url);
+        if (!imageParts) return 0;
+
+        let score = 0;
+        const key = safelyDecodeUrlPart(image.key).toLowerCase();
+        if (key.length >= 8 && serializedItem.includes(key)) score = Math.max(score, 1400 + key.length);
+
+        for (const parts of visibleParts) {
+            if (parts.identity === imageParts.identity) score = Math.max(score, 1300);
+            if (parts.pathname === imageParts.pathname) score = Math.max(score, 1100);
+            if (parts.basename.length >= 12 && parts.basename === imageParts.basename) {
+                score = Math.max(score, 900 + parts.basename.length);
+            }
+            for (const token of parts.tokens) {
+                if (imageParts.tokens.has(token)) score = Math.max(score, 500 + token.length);
+                if (key.length >= 8 && (key.includes(token) || token.includes(key))) {
+                    score = Math.max(score, 700 + Math.min(key.length, token.length));
+                }
+            }
+        }
+        return score;
+    }
+
+    function resolveImageForBlock(item) {
+        const visibleUrls = collectImageBlockUrls(item);
+        const visibleParts = visibleUrls.map(getComparableUrlParts).filter(Boolean);
+        const serializedItem = safelyDecodeUrlPart(item.outerHTML).toLowerCase();
+        let bestImage = null;
+        let bestScore = 0;
+
+        for (const image of chatImages) {
+            const score = scoreCachedImageForBlock(image, serializedItem, visibleParts);
+            if (score > bestScore) {
+                bestImage = image;
+                bestScore = score;
+            }
+        }
+        if (bestImage && bestScore >= 500) return bestImage;
+
+        const fallbackUrl = visibleUrls[0];
+        if (!fallbackUrl) return null;
+        const imageElement = item.querySelector('img');
+        return {
+            url: fallbackUrl,
+            key: '',
+            width: imageElement?.naturalWidth || 0,
+            height: imageElement?.naturalHeight || 0
+        };
+    }
+
+    function createInlineImageFilename(image) {
+        const now = new Date();
+        const pad = (value, length = 2) => String(value).padStart(length, '0');
+        const timestamp = [
+            now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate()), '_',
+            pad(now.getHours()), pad(now.getMinutes()), pad(now.getSeconds()), '_',
+            pad(now.getMilliseconds(), 3)
+        ].join('');
+        const cachedIndex = chatImages.indexOf(image);
+        const suffix = cachedIndex >= 0 ? `_${pad(cachedIndex + 1)}` : '';
+        return `image_${PLATFORM_CODE}_${timestamp}${suffix}.png`;
+    }
+
+    function createInlineVideoFilename(video) {
+        const now = new Date();
+        const pad = (value, length = 2) => String(value).padStart(length, '0');
+        const timestamp = [
+            now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate()), '_',
+            pad(now.getHours()), pad(now.getMinutes()), pad(now.getSeconds()), '_',
+            pad(now.getMilliseconds(), 3)
+        ].join('');
+        const cachedIndex = chatVideos.indexOf(video);
+        const suffix = cachedIndex >= 0 ? `_${pad(cachedIndex + 1)}` : '';
+        return `video_${PLATFORM_CODE}_${timestamp}${suffix}.mp4`;
+    }
+
+    function createInlineDownloadHost(item, image) {
+        if (getComputedStyle(item).position === 'static') item.style.position = 'relative';
+        item.dataset.doubaoNomarkImageItem = 'true';
+
+        const host = document.createElement('span');
+        host.setAttribute(INLINE_DOWNLOAD_HOST_ATTRIBUTE, '');
+        const shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `
+            <style>
+                :host {
+                    all: initial;
+                    position: absolute;
+                    right: 7px;
+                    bottom: 7px;
+                    z-index: 20;
+                    display: block;
+                    width: 28px;
+                    height: 28px;
+                    opacity: 0;
+                    pointer-events: none;
+                    transform: translateY(2px);
+                    transition: opacity 140ms ease, transform 140ms ease;
+                }
+                :host-context([data-doubao-nomark-image-item]:hover),
+                :host(:focus-within) {
+                    opacity: 1;
+                    pointer-events: auto;
+                    transform: translateY(0);
+                }
+                button {
+                    all: unset;
+                    box-sizing: border-box;
+                    width: 28px;
+                    height: 28px;
+                    display: grid;
+                    place-items: center;
+                    border: 0;
+                    border-radius: 6px;
+                    background: rgba(18, 18, 20, 0.18);
+                    color: rgba(255, 255, 255, 0.96);
+                    cursor: pointer;
+                    line-height: 1;
+                    transition: background-color 120ms ease, transform 120ms ease;
+                }
+                button:hover {
+                    background: rgba(18, 18, 20, 0.4);
+                    transform: translateY(-1px);
+                }
+                button:active { transform: translateY(0); }
+                button:focus-visible {
+                    background: rgba(18, 18, 20, 0.4);
+                    outline: 1px solid rgba(255, 255, 255, 0.9);
+                    outline-offset: 1px;
+                }
+                button:disabled { cursor: wait; opacity: 0.82; }
+                .icon {
+                    width: 18px;
+                    height: 18px;
+                    display: grid;
+                    place-items: center;
+                }
+                .icon svg {
+                    width: 18px;
+                    height: 18px;
+                    display: block;
+                }
+                button.is-loading .icon {
+                    box-sizing: border-box;
+                    width: 14px;
+                    height: 14px;
+                    border: 2px solid rgba(255, 255, 255, 0.45);
+                    border-top-color: #fff;
+                    border-radius: 50%;
+                    animation: spin 650ms linear infinite;
+                }
+                button.is-loading .icon svg,
+                button.is-success .icon svg { display: none; }
+                button.is-success .icon::before {
+                    content: '\\2713';
+                    font: 600 16px/1 Arial, sans-serif;
+                }
+                @keyframes spin { to { transform: rotate(360deg); } }
+                @media (hover: none) {
+                    :host {
+                        opacity: 1;
+                        pointer-events: auto;
+                        transform: translateY(0);
+                    }
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    :host { transition: none; }
+                }
+            </style>
+            <button type="button" title="下载无水印图片" aria-label="下载无水印图片">
+                <span class="icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 3V15M12 15L7.5 10.5M12 15L16.5 10.5M5 17V19C5 20.1 5.9 21 7 21H17C18.1 21 19 20.1 19 19V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </span>
+            </button>
+        `;
+
+        host.doubaoNomarkImage = image;
+        const button = shadow.querySelector('button');
+        button.addEventListener('click', async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            if (button.disabled) return;
+
+            const currentImage = host.doubaoNomarkImage;
+            if (!currentImage?.url) return;
+            button.disabled = true;
+            button.classList.add('is-loading');
+            button.setAttribute('aria-busy', 'true');
+            const succeeded = await downloadImage(currentImage.url, createInlineImageFilename(currentImage));
+            button.classList.remove('is-loading');
+            button.classList.toggle('is-success', succeeded);
+            button.removeAttribute('aria-busy');
+            if (succeeded) await new Promise(resolve => setTimeout(resolve, 700));
+            button.classList.remove('is-success');
+            button.disabled = false;
+        });
+        item.appendChild(host);
+        return host;
+    }
+
+    function getInlineImageItems() {
+        const items = [];
+        document.querySelectorAll(INLINE_IMAGE_GRID_SELECTOR).forEach(grid => {
+            for (const child of grid.children) {
+                if (child.querySelector('[data-testid="mdbox_image"], picture img[src]')) {
+                    items.push(child);
+                }
+            }
+        });
+        return items;
+    }
+
+    function getInlineVideoItems() {
+        const items = new Set();
+        document.querySelectorAll('video[mediatype="video"], .xgplayer video').forEach(video => {
+            const videoBlock = video.closest('[class*="block-video-"]');
+            const item = video.closest('[class*="image-box-grid-item-"]') || videoBlock?.parentElement;
+            if (item) items.add(item);
+        });
+        return [...items];
+    }
+
+    function collectVideoBlockMedia(item) {
+        const sourceUrls = new Set();
+        const posterUrls = new Set();
+        const video = item.querySelector('video');
+        if (video) {
+            for (const value of [video.currentSrc, video.src, video.getAttribute('src')]) {
+                if (isHttpUrl(value)) sourceUrls.add(value);
+            }
+            video.querySelectorAll('source').forEach(source => {
+                for (const value of [source.src, source.getAttribute('src')]) {
+                    if (isHttpUrl(value)) sourceUrls.add(value);
+                }
+            });
+            if (isHttpUrl(video.poster)) posterUrls.add(video.poster);
+        }
+        item.querySelectorAll('img[src]').forEach(image => {
+            const value = image.currentSrc || image.src;
+            if (isHttpUrl(value)) posterUrls.add(value);
+        });
+        item.querySelectorAll('xg-poster[style]').forEach(poster => {
+            const match = poster.getAttribute('style')?.match(/url\(["']?([^"')]+)["']?\)/i);
+            if (match && isHttpUrl(match[1])) posterUrls.add(match[1]);
+        });
+        return { sourceUrls: [...sourceUrls], posterUrls: [...posterUrls] };
+    }
+
+    function getVideoPathTail(value) {
+        const parts = getComparableUrlParts(value);
+        if (!parts) return '';
+        const videoPathStart = parts.pathname.indexOf('/video/');
+        return videoPathStart >= 0 ? parts.pathname.slice(videoPathStart) : '';
+    }
+
+    function getLongUrlTokens(value) {
+        try {
+            const url = new URL(value, window.location.href);
+            const decoded = safelyDecodeUrlPart(`${url.pathname} ${[...url.searchParams.values()].join(' ')}`)
+                .toLowerCase();
+            return new Set(decoded.match(/[a-z0-9][a-z0-9_-]{11,}/gi) || []);
+        } catch (_) {
+            return new Set();
+        }
+    }
+
+    function scoreVideoUrlPair(cachedUrl, visibleUrl) {
+        if (!isHttpUrl(cachedUrl) || !isHttpUrl(visibleUrl)) return 0;
+        if (isSameUrl(cachedUrl, visibleUrl)) return 1300;
+
+        const cachedParts = getComparableUrlParts(cachedUrl);
+        const visibleParts = getComparableUrlParts(visibleUrl);
+        if (cachedParts?.pathname === visibleParts?.pathname) return 1150;
+
+        const cachedTail = getVideoPathTail(cachedUrl);
+        const visibleTail = getVideoPathTail(visibleUrl);
+        if (cachedTail.length >= 20 && cachedTail === visibleTail) return 1050;
+
+        let score = 0;
+        const cachedTokens = getLongUrlTokens(cachedUrl);
+        for (const token of getLongUrlTokens(visibleUrl)) {
+            if (cachedTokens.has(token)) score = Math.max(score, 500 + token.length);
+        }
+        return score;
+    }
+
+    function resolveVideoForBlock(item, videoItems) {
+        const { sourceUrls, posterUrls } = collectVideoBlockMedia(item);
+        const serializedItem = safelyDecodeUrlPart(item.outerHTML).toLowerCase();
+        let bestVideo = null;
+        let bestScore = 0;
+
+        for (const video of chatVideos) {
+            let score = 0;
+            const vid = getStableValue(video.vid).toLowerCase();
+            if (vid.length >= 8 && serializedItem.includes(vid)) score = 1500 + vid.length;
+            for (const sourceUrl of sourceUrls) {
+                score = Math.max(score, scoreVideoUrlPair(video.url, sourceUrl));
+            }
+            for (const posterUrl of posterUrls) {
+                score = Math.max(score, scoreVideoUrlPair(video.poster_url, posterUrl));
+            }
+            if (score > bestScore) {
+                bestVideo = video;
+                bestScore = score;
+            }
+        }
+        if (bestVideo && bestScore >= 500) return bestVideo;
+        if (chatVideos.length === 1 && videoItems.length === 1) return chatVideos[0];
+        return null;
+    }
+
+    function bindNativeVideoDownload(item, video) {
+        const action = item.querySelector('[data-testid="edit_image_hover_tag_download_btn"]');
+        if (!action || !video?.url) return;
+
+        action.doubaoNomarkVideo = video;
+        action.setAttribute('title', '下载无水印视频');
+        action.setAttribute('aria-label', '下载无水印视频');
+        if (action.hasAttribute(INLINE_VIDEO_DOWNLOAD_ATTRIBUTE)) return;
+        action.setAttribute(INLINE_VIDEO_DOWNLOAD_ATTRIBUTE, '');
+
+        action.addEventListener('click', async event => {
+            const currentVideo = action.doubaoNomarkVideo;
+            if (!currentVideo?.url || action.dataset.doubaoNomarkDownloading === 'true') return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+
+            action.dataset.doubaoNomarkDownloading = 'true';
+            action.setAttribute('aria-busy', 'true');
+            const previousOpacity = action.style.opacity;
+            action.style.opacity = '0.58';
+            await downloadImage(currentVideo.url, createInlineVideoFilename(currentVideo));
+            action.style.opacity = previousOpacity;
+            action.removeAttribute('aria-busy');
+            delete action.dataset.doubaoNomarkDownloading;
+        }, true);
+    }
+
+    function syncInlineDownloadButtons() {
+        inlineDownloadSyncFrame = 0;
+        if (!document.body || !isDoubaoHost()) return;
+        getInlineImageItems().forEach(item => {
+            const image = resolveImageForBlock(item);
+            let host = [...item.children].find(child =>
+                child.hasAttribute?.(INLINE_DOWNLOAD_HOST_ATTRIBUTE)
+            );
+            if (!image) {
+                host?.remove();
+                return;
+            }
+            if (!host) host = createInlineDownloadHost(item, image);
+            host.doubaoNomarkImage = image;
+        });
+
+        const videoItems = getInlineVideoItems();
+        videoItems.forEach(item => {
+            const video = resolveVideoForBlock(item, videoItems);
+            if (video) bindNativeVideoDownload(item, video);
+        });
+    }
+
+    function scheduleInlineDownloadSync() {
+        if (inlineDownloadSyncFrame || !document.body || !isDoubaoHost()) return;
+        inlineDownloadSyncFrame = requestAnimationFrame(syncInlineDownloadButtons);
+    }
+
+    function initInlineDownloadButtons() {
+        if (inlineDownloadObserver || !document.body || !isDoubaoHost()) {
+            scheduleInlineDownloadSync();
+            return;
+        }
+        inlineDownloadObserver = new MutationObserver(scheduleInlineDownloadSync);
+        inlineDownloadObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'srcset']
+        });
+        scheduleInlineDownloadSync();
     }
 
     function addChatVideo(videoInfo) {
@@ -978,14 +1422,14 @@
     }
 
     async function downloadImage(url, filename) {
-        if (!isHttpUrl(url)) return;
+        if (!isHttpUrl(url)) return false;
         try {
             console.log('[无印豆包] 开始下载:', url);
 
             if (document.documentElement.dataset.doubaoNomarkBridge === 'ready') {
                 await requestExtensionDownload(url, filename || 'doubao_media');
                 console.log('[无印豆包] 下载任务已提交:', filename);
-                return;
+                return true;
             }
             
             const response = await fetch(url);
@@ -1004,9 +1448,11 @@
             setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
             
             console.log('[无印豆包] 下载完成:', filename);
+            return true;
         } catch (error) {
             console.error('[无印豆包] 下载失败:', error);
             alert('下载失败，请重试');
+            return false;
         }
     }
 
@@ -1192,6 +1638,7 @@
 
     function initScript() {
         console.log('[无印豆包] 脚本已加载');
+        initInlineDownloadButtons();
         
         if (window.location.pathname.includes('/chat/')) {
             createFloatingButton();

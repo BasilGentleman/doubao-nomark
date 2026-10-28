@@ -4,6 +4,7 @@
   const PAGE_HOSTS = new Set(['www.doubao.com', 'www.dola.com', 'www.qianwen.com']);
   const FALLBACK_HOST_SUFFIXES = ['.snssdk.com', '.douyinvod.com', '.dola.com', '.byteintlapi.com'];
   const REQUEST_TIMEOUT_MS = 20000;
+  const DOWNLOAD_FAILURE_MESSAGE = 'doubao-nomark-download-failure';
 
   function hasAllowedPageUrl(value) {
     try {
@@ -63,6 +64,25 @@
     });
   }
 
+  function notifyDownloadFailure(sender, message, error) {
+    const tabId = sender?.tab?.id;
+    if (!Number.isInteger(tabId)) return;
+    const failureMessage = {
+      type: DOWNLOAD_FAILURE_MESSAGE,
+      requestId: message.requestId,
+      filename: normalizeFilename(message.filename),
+      error: error.message || '浏览器未能创建下载任务'
+    };
+    const ignoreMissingReceiver = () => {
+      void chrome.runtime.lastError;
+    };
+    if (Number.isInteger(sender.frameId)) {
+      chrome.tabs.sendMessage(tabId, failureMessage, { frameId: sender.frameId }, ignoreMissingReceiver);
+    } else {
+      chrome.tabs.sendMessage(tabId, failureMessage, ignoreMissingReceiver);
+    }
+  }
+
   async function fetchFallbackJson(url) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -102,14 +122,17 @@
       return undefined;
     }
 
-    startDownload({
+    const options = {
       url: message.url,
       filename: normalizeFilename(message.filename),
       saveAs: false,
       conflictAction: 'uniquify'
-    })
-      .then(() => sendResponse({ ok: true }))
-      .catch(error => sendResponse({ ok: false, error: error.message || '后台下载失败' }));
-    return true;
+    };
+
+    // A download may take time to initialize on a media CDN. Acknowledge the
+    // validated request immediately, then report a real creation failure later.
+    sendResponse({ ok: true, accepted: true });
+    startDownload(options).catch(error => notifyDownloadFailure(sender, message, error));
+    return undefined;
   });
 })();
